@@ -1,0 +1,10 @@
+{
+  "name": "Remix: Enterprise Multilingual Translation Platform",
+  "description": "سامانه جامع ترجمه چندزبانه سازمانی تخصصی عمران و ساخت و ساز با ترجمه متون، اسناد، گفتار، نویسه‌خوان (OCR) و مدیریت واژه‌نامه تخصصی",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

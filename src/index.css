@@ -1,0 +1,42 @@
+@import "tailwindcss";
+
+@theme {
+  --color-brand-primary: #1a237e;
+  --color-brand-secondary: #00bcd4;
+  --color-brand-accent: #f97316;
+  --color-brand-dark: #0f172a;
+  --color-brand-light: #eff3f6;
+  --color-clay: #f97316;
+  --color-sand: #f8fafc;
+  
+  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+}
+
+@layer base {
+  body {
+    background-color: var(--color-brand-light);
+    color: var(--color-brand-dark);
+    font-family: var(--font-sans);
+    direction: rtl; /* Default RTL support for Farsi */
+  }
+}
+
+/* Custom scrollbars for data and logs panels */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+
+
