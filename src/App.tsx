@@ -397,9 +397,10 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
     fetchProjects();
     fetchArchivedFiles();
     
+    const userNameDisplay = currentUser ? currentUser.name : "احراز هویت نشده";
     // Seed initial audit log entries
     setSystemLogs([
-      `[11:21:00] تصدیق هویت کاربر "${currentUser.name}" با موفقیت در Active Directory انجام شد.`,
+      `[11:21:00] تصدیق هویت کاربر "${userNameDisplay}" با موفقیت در Active Directory انجام شد.`,
       `[11:05:40] سرویس ترجمه NLLB-200 بارگذاری شد و تخصیص حافظه GPU تایید گردید.`,
       `[10:48:12] پشتیبان‌گیری پشته دیتابیس عمران آذرستان با موفقیت در آدرس شبکه انجام شد.`,
       `[09:15:30] تعداد ۱۹ کاربران به صورت متقارن به وب‌سرور متصل گردیدند.`
@@ -408,6 +409,7 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
 
   // Sync user change logs
   useEffect(() => {
+    if (!currentUser) return;
     addSystemLog(`[AD LOG] کاربر فعال به "${currentUser.name}" تغییر یافت. (نقش: ${currentUser.role} | بخش: ${currentUser.department})`);
     if (currentUser.role !== "Admin" && activeTab === "admin-setup") {
       setActiveTab("translate");
@@ -2363,7 +2365,7 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
             مستندات معماری و استقرار (۱۳ سند)
           </button>
 
-          {currentUser.role === "Admin" && (
+          {currentUser?.role === "Admin" && (
             <button
               onClick={() => setActiveTab("admin-setup")}
               className={`flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-bold transition-all ${
