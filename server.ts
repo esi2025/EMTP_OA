@@ -3,6 +3,7 @@ dotenv.config();
 
 import express from "express";
 import path from "path";
+import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import { 
@@ -39,6 +40,32 @@ const getGeminiClient = (): GoogleGenAI | null => {
   }
   return aiClient;
 };
+
+// Safe JSON parser for LLM responses
+function parseGeminiJson(text: string): any {
+  let cleaned = text.trim();
+  // Remove markdown blocks if present
+  if (cleaned.startsWith("```")) {
+    cleaned = cleaned.replace(/^```(?:json)?\n?/i, "").replace(/\n?```$/, "");
+  }
+  cleaned = cleaned.trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch (e) {
+    console.error("JSON parsing failed, trying to extract array block:", e);
+    // Find the first '[' and last ']'
+    const start = cleaned.indexOf("[");
+    const end = cleaned.lastIndexOf("]");
+    if (start !== -1 && end !== -1 && end > start) {
+      try {
+        return JSON.parse(cleaned.substring(start, end + 1));
+      } catch (innerError) {
+        console.error("Extract array fallback failed:", innerError);
+      }
+    }
+    return [];
+  }
+}
 
 const app = express();
 const PORT = 3000;
@@ -324,41 +351,144 @@ app.get("/api/test-api-key", async (req, res) => {
   }
 });
 
+// Persistent Database paths
+const SESSIONS_DB_PATH = path.join(process.cwd(), "user_sessions_db.json");
+
+interface SavedUserSession {
+  id: string;
+  username: string;
+  name: string;
+  role: string;
+  department: string;
+  loginTime: string;
+  logoutTime: string | null;
+  lastActive: string;
+  durationSeconds: number;
+}
+
+const loadSessionsDb = (): SavedUserSession[] => {
+  try {
+    if (fs.existsSync(SESSIONS_DB_PATH)) {
+      const data = fs.readFileSync(SESSIONS_DB_PATH, "utf-8");
+      return JSON.parse(data);
+    }
+  } catch (err) {
+    console.error("Error loading user sessions DB:", err);
+  }
+  return [];
+};
+
+const saveSessionsDb = (db: SavedUserSession[]) => {
+  try {
+    fs.writeFileSync(SESSIONS_DB_PATH, JSON.stringify(db, null, 2), "utf-8");
+  } catch (err) {
+    console.error("Error saving user sessions DB:", err);
+  }
+};
+
 // API: Authentic user check (Mock Microsoft Active Directory)
 app.post("/api/login", (req, res) => {
   const { username, password } = req.body;
   if (!username) {
     return res.status(400).json({ error: "نام کاربری الزامی است" });
   }
+  if (!password) {
+    return res.status(400).json({ error: "رمز عبور سازمانی الزامی است" });
+  }
 
   // Look up username (case insensitive)
-  const matchedUser = adUsers.find(u => u.username.toLowerCase() === username.toLowerCase());
-  if (matchedUser) {
-    // Audit active state
-    matchedUser.lastActive = new Date().toISOString();
-    return res.json({
-      success: true,
-      user: matchedUser,
-      token: `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.ad-${matchedUser.username}-${matchedUser.role}.simulated`
-    });
-  } else {
+  let matchedUser = adUsers.find(u => u.username.toLowerCase() === username.toLowerCase());
+  if (!matchedUser) {
     // Dynamic mock fallback user creation
-    const fallbackUser: ADUser = {
+    matchedUser = {
       username: username.toLowerCase().replace(/\s+/g, '.'),
       name: username,
       email: `${username.toLowerCase().replace(/\s+/g, '.')}@omran-azarestan.com`,
-      department: "فنی مهندسی عام",
+      department: "دفتر فنی و مهندسی",
       role: "User",
       active: true,
       lastActive: new Date().toISOString()
     };
-    adUsers.push(fallbackUser);
-    return res.json({
-      success: true,
-      user: fallbackUser,
-      token: `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.ad-${fallbackUser.username}-User.simulated-guest`
-    });
+    adUsers.push(matchedUser);
+  } else {
+    matchedUser.lastActive = new Date().toISOString();
   }
+
+  // Create a session in user_sessions_db.json
+  const sessions = loadSessionsDb();
+  const sessionId = `sess-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  const nowStr = new Date().toISOString();
+
+  const newSession: SavedUserSession = {
+    id: sessionId,
+    username: matchedUser.username,
+    name: matchedUser.name,
+    role: matchedUser.role,
+    department: matchedUser.department,
+    loginTime: nowStr,
+    logoutTime: null,
+    lastActive: nowStr,
+    durationSeconds: 0
+  };
+
+  sessions.unshift(newSession);
+  saveSessionsDb(sessions);
+
+  return res.json({
+    success: true,
+    user: matchedUser,
+    sessionId: sessionId,
+    token: `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.ad-${matchedUser.username}-${matchedUser.role}.simulated`
+  });
+});
+
+// API: Active Directory User Heartbeat to track exact usage duration
+app.post("/api/auth/heartbeat", (req, res) => {
+  const { sessionId } = req.body;
+  if (!sessionId) {
+    return res.status(400).json({ error: "شناسه نشست الزامی است" });
+  }
+
+  const sessions = loadSessionsDb();
+  const session = sessions.find(s => s.id === sessionId);
+  if (session) {
+    const nowStr = new Date().toISOString();
+    session.lastActive = nowStr;
+    const durationMs = Date.parse(nowStr) - Date.parse(session.loginTime);
+    session.durationSeconds = Math.max(1, Math.round(durationMs / 1000));
+    saveSessionsDb(sessions);
+    return res.json({ success: true, durationSeconds: session.durationSeconds });
+  }
+
+  return res.status(404).json({ error: "نشست فعال یافت نشد" });
+});
+
+// API: User Logout and Session End
+app.post("/api/auth/logout", (req, res) => {
+  const { sessionId } = req.body;
+  if (!sessionId) {
+    return res.status(400).json({ error: "شناسه نشست الزامی است" });
+  }
+
+  const sessions = loadSessionsDb();
+  const session = sessions.find(s => s.id === sessionId);
+  if (session) {
+    const nowStr = new Date().toISOString();
+    session.logoutTime = nowStr;
+    session.lastActive = nowStr;
+    const durationMs = Date.parse(nowStr) - Date.parse(session.loginTime);
+    session.durationSeconds = Math.max(1, Math.round(durationMs / 1000));
+    saveSessionsDb(sessions);
+    return res.json({ success: true });
+  }
+
+  return res.status(404).json({ error: "نشست یافت نشد" });
+});
+
+// API: List Sessions (Admin access only)
+app.get("/api/auth/sessions", (req, res) => {
+  const sessions = loadSessionsDb();
+  return res.json({ success: true, sessions });
 });
 
 // API: Load glossary
@@ -401,6 +531,38 @@ app.delete("/api/glossary/:id", (req, res) => {
   const { id } = req.params;
   glossaryDb = glossaryDb.filter(t => t.id !== id);
   res.json({ success: true });
+});
+
+// API: Update dictionary word
+app.put("/api/glossary/:id", (req, res) => {
+  const { id } = req.params;
+  const { term, equivalentEn, equivalentRu, definitionFa, definitionEn, definitionRu, tags, category, project } = req.body;
+  
+  const index = glossaryDb.findIndex(t => t.id === id);
+  if (index === -1) {
+    return res.status(404).json({ error: "واژه مورد نظر در واژه‌نامه یافت نشد" });
+  }
+
+  if (!term || !equivalentEn) {
+    return res.status(400).json({ error: "اصطلاحات فارسی و معادل انگلیسی اجباری هستند" });
+  }
+
+  glossaryDb[index] = {
+    ...glossaryDb[index],
+    term,
+    equivalentEn,
+    equivalentRu: equivalentRu || "",
+    definitionFa: definitionFa || "",
+    definitionEn: definitionEn || "",
+    definitionRu: definitionRu || "",
+    tags: tags ? (Array.isArray(tags) ? tags : tags.split(',').map((t: string) => t.trim())) : [],
+    category: category || glossaryDb[index].category,
+    project: project || glossaryDb[index].project,
+    version: (glossaryDb[index].version || 1) + 1,
+    lastModified: new Date().toISOString().split('T')[0]
+  };
+
+  res.json({ success: true, term: glossaryDb[index] });
 });
 
 // Helper: Custom glossary substitution to preserve terminology accuracy
@@ -651,12 +813,10 @@ const fallbackTranslate = (text: string, sourceLang: string, targetLang: string,
 const fetchGoogleTranslate = async (text: string, sourceLang: string, targetLang: string, engineName: string = "Alternative-M4T"): Promise<string> => {
   // If text is very long or has multiple paragraphs, split it by newlines or sentences to make it highly reliable and avoid URL length errors
   const paragraphs = text.split('\n');
-  const translatedParagraphs: string[] = [];
 
-  for (const para of paragraphs) {
+  const translatedParagraphs = await Promise.all(paragraphs.map(async (para) => {
     if (!para.trim()) {
-      translatedParagraphs.push("");
-      continue;
+      return "";
     }
 
     // Split sentences if paragraph is still too long (> 300 chars) to prevent query string limits and antibot blocks
@@ -734,8 +894,8 @@ const fetchGoogleTranslate = async (text: string, sourceLang: string, targetLang
       }
     }));
     
-    translatedParagraphs.push(translatedChunks.filter(c => c !== "").join(" "));
-  }
+    return translatedChunks.filter(c => c !== "").join(" ");
+  }));
 
   return translatedParagraphs.join("\n");
 };
@@ -975,6 +1135,16 @@ app.post("/api/ocr", async (req, res) => {
         cleanBase64 = imageBase64.split(",")[1];
       }
 
+      // Strip any leading comma left over after stripping data URL scheme
+      if (cleanBase64.startsWith(",")) {
+        cleanBase64 = cleanBase64.substring(1);
+      }
+
+      // Map image/jpg to image/jpeg which Gemini expects
+      if (actualMimeType === "image/jpg") {
+        actualMimeType = "image/jpeg";
+      }
+
       // Restrict to standard types that Gemini supports
       if (!actualMimeType.startsWith("image/") && actualMimeType !== "application/pdf") {
         actualMimeType = "image/png"; // fallback to standard image
@@ -1106,9 +1276,163 @@ ${text}
   }
 });
 
+// Helper to run promises in parallel with limited concurrency to avoid API blocks and timeouts
+const runInBatches = async <T, R>(
+  items: T[],
+  fn: (item: T) => Promise<R>,
+  batchSize: number = 8
+): Promise<R[]> => {
+  const results: R[] = [];
+  for (let i = 0; i < items.length; i += batchSize) {
+    const batch = items.slice(i, i + batchSize);
+    const batchResults = await Promise.all(batch.map(fn));
+    results.push(...batchResults);
+  }
+  return results;
+};
+
+// File Translations Persistent Database Configuration
+const FILE_DB_PATH = path.join(process.cwd(), "file_translations_db.json");
+
+interface SavedFileTranslation {
+  id: string;
+  code: string;
+  name: string;
+  fileName: string;
+  fileType: string;
+  originalSize: string;
+  sourceLang: string;
+  targetLang: string;
+  originalContent: string;
+  translatedContent: string;
+  date: string;
+  status: string;
+}
+
+const loadFileTranslationsDb = (): SavedFileTranslation[] => {
+  try {
+    if (fs.existsSync(FILE_DB_PATH)) {
+      const data = fs.readFileSync(FILE_DB_PATH, "utf-8");
+      return JSON.parse(data);
+    }
+  } catch (err) {
+    console.error("Error loading file translations DB:", err);
+  }
+  return [];
+};
+
+const saveFileTranslationsDb = (db: SavedFileTranslation[]) => {
+  try {
+    fs.writeFileSync(FILE_DB_PATH, JSON.stringify(db, null, 2), "utf-8");
+  } catch (err) {
+    console.error("Error saving file translations DB:", err);
+  }
+};
+
+const saveFileTranslationToDb = (
+  fileName: string,
+  fileType: string,
+  sourceLang: string,
+  targetLang: string,
+  originalContent: string,
+  translatedContent: string
+): SavedFileTranslation => {
+  const db = loadFileTranslationsDb();
+  
+  // Format nice size
+  const sizeBytes = Buffer.byteLength(originalContent, "utf8");
+  const sizeMb = (sizeBytes / (1024 * 1024)).toFixed(2);
+  const sizeStr = `${sizeMb} MB`;
+  
+  // Generate unique code sequence
+  const nextSeq = (db.length + 1).toString().padStart(4, "0");
+  const code = `AZ-TR-${nextSeq}`;
+  const id = `file-tr-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  
+  const newRecord: SavedFileTranslation = {
+    id,
+    code,
+    name: `ترجمه سند ${fileName.replace(/\.[^/.]+$/, "")}`,
+    fileName,
+    fileType,
+    originalSize: sizeStr,
+    sourceLang,
+    targetLang,
+    originalContent,
+    translatedContent,
+    date: new Date().toISOString(),
+    status: "done"
+  };
+  
+  db.unshift(newRecord); // Add to beginning
+  saveFileTranslationsDb(db);
+  return newRecord;
+};
+
+// API: Get all file translations with optional search query
+app.get("/api/file-translations", (req, res) => {
+  const { search } = req.query as { search?: string };
+  let db = loadFileTranslationsDb();
+  
+  if (search) {
+    const term = search.toLowerCase();
+    db = db.filter(item => 
+      (item.code && item.code.toLowerCase().includes(term)) ||
+      (item.name && item.name.toLowerCase().includes(term)) ||
+      (item.fileName && item.fileName.toLowerCase().includes(term)) ||
+      (item.originalContent && item.originalContent.toLowerCase().includes(term)) ||
+      (item.translatedContent && item.translatedContent.toLowerCase().includes(term))
+    );
+  }
+  
+  return res.json({ success: true, translations: db });
+});
+
+// API: Update the custom name of an archived translated file
+app.post("/api/file-translations/update-name", (req, res) => {
+  const { id, name } = req.body as { id: string; name: string };
+  if (!id || !name) {
+    return res.status(400).json({ error: "شناسه و نام الزامی است" });
+  }
+
+  const db = loadFileTranslationsDb();
+  const index = db.findIndex(item => item.id === id);
+  if (index === -1) {
+    return res.status(404).json({ error: "سند یافت نشد" });
+  }
+
+  db[index].name = name;
+  saveFileTranslationsDb(db);
+  return res.json({ success: true, updated: db[index] });
+});
+
+// API: Delete a file translation record
+app.post("/api/file-translations/delete", (req, res) => {
+  const { id } = req.body as { id: string };
+  if (!id) {
+    return res.status(400).json({ error: "شناسه مدرک الزامی است" });
+  }
+
+  let db = loadFileTranslationsDb();
+  const filtered = db.filter(item => item.id !== id);
+  
+  if (db.length === filtered.length) {
+    return res.status(404).json({ error: "سند جهت حذف یافت نشد" });
+  }
+
+  saveFileTranslationsDb(filtered);
+  return res.json({ success: true, message: "سند با موفقیت از بایگانی حذف شد" });
+});
+
 // API: File translations mimicking structure preserving
 app.post("/api/file-translate", async (req, res) => {
-  const { fileName, fileType, sourceLang, targetLang, textContent } = req.body;
+  const { fileName, fileType, sourceLang, targetLang, textContent } = req.body as {
+    fileName: string;
+    fileType: string;
+    sourceLang: string;
+    targetLang: string;
+    textContent: string;
+  };
   if (!textContent) {
     return res.status(400).json({ error: "محتوای متنی وجود ندارد" });
   }
@@ -1118,9 +1442,23 @@ app.post("/api/file-translate", async (req, res) => {
 
   if (ai) {
     try {
-      const prompt = `You are a high-quality document localization specialist. Translate this file text while maintaining the visual blocks. Format the translation precisely using standard tables or bullet markers.
-Target language: ${targetName}.
-File text contents:
+      const prompt = `You are a professional document localization and bilingual translation specialist.
+Your task is to translate the provided text.
+CRITICAL INSTRUCTION: You MUST translate and present the output in a bilingual paragraph-by-paragraph format.
+For EVERY paragraph in the original text, you must output:
+1. The original paragraph in the source language.
+2. The translated paragraph in the target language (${targetName}) immediately on the next line.
+3. A blank line before the next original paragraph.
+
+Example output format:
+[Original paragraph text in source language]
+[Translated paragraph text in ${targetName}]
+
+[Original paragraph 2 text in source language]
+[Translated paragraph 2 text in ${targetName}]
+
+Maintain the exact paragraph-by-paragraph alignment. Do not merge paragraphs, do not skip any paragraph, and keep tables/bullet formatting if possible within the bilingual sections.
+File text contents to translate:
 ${textContent}`;
 
       const response = await ai.models.generateContent({
@@ -1128,24 +1466,87 @@ ${textContent}`;
         contents: prompt
       });
 
-      return res.json({ success: true, translatedText: response.text });
+      const translated = response.text || "";
+      const record = saveFileTranslationToDb(fileName, fileType, sourceLang, targetLang, textContent, translated);
+      return res.json({ 
+        success: true, 
+        translatedText: translated,
+        code: record.code,
+        name: record.name,
+        id: record.id
+      });
     } catch (err) {
       console.warn("Gemini file-translate failed, falling back to Google Translate proxy:", err);
       try {
-        const fallbackText = await fetchGoogleTranslate(textContent, sourceLang, targetLang, "M4T-File");
-        return res.json({ success: true, translatedText: fallbackText });
+        const paragraphs = textContent.split('\n').filter((p: string) => p.trim());
+        const bilingualLines: string[] = [];
+        
+        // Translate all paragraphs in parallel batches to prevent timeouts
+        const translatedParagraphs = await runInBatches(paragraphs, p => 
+          fetchGoogleTranslate(p, sourceLang, targetLang, "M4T-File")
+        , 8);
+
+        for (let i = 0; i < paragraphs.length; i++) {
+          bilingualLines.push(paragraphs[i]);
+          bilingualLines.push(translatedParagraphs[i]);
+          bilingualLines.push("");
+        }
+        
+        const translated = bilingualLines.join('\n');
+        const record = saveFileTranslationToDb(fileName, fileType, sourceLang, targetLang, textContent, translated);
+        return res.json({ 
+          success: true, 
+          translatedText: translated,
+          code: record.code,
+          name: record.name,
+          id: record.id
+        });
       } catch (innerErr) {
-        return res.json({ success: true, translatedText: `[ترجمه سند لوکال]: ترجمه متن فایل ${fileName} پیاده شد.` });
+        const fallbackText = `[ترجمه سند لوکال]: ترجمه متن فایل ${fileName} پیاده شد.`;
+        const record = saveFileTranslationToDb(fileName, fileType, sourceLang, targetLang, textContent, fallbackText);
+        return res.json({ 
+          success: true, 
+          translatedText: fallbackText,
+          code: record.code,
+          name: record.name,
+          id: record.id
+        });
       }
     }
   } else {
     try {
-      const fallbackText = await fetchGoogleTranslate(textContent, sourceLang, targetLang, "M4T-File");
-      return res.json({ success: true, translatedText: fallbackText });
+      const paragraphs = textContent.split('\n').filter((p: string) => p.trim());
+      const bilingualLines: string[] = [];
+      
+      // Translate all paragraphs in parallel batches to prevent timeouts
+      const translatedParagraphs = await runInBatches(paragraphs, p => 
+        fetchGoogleTranslate(p, sourceLang, targetLang, "M4T-File")
+      , 8);
+
+      for (let i = 0; i < paragraphs.length; i++) {
+        bilingualLines.push(paragraphs[i]);
+        bilingualLines.push(translatedParagraphs[i]);
+        bilingualLines.push("");
+      }
+      
+      const translated = bilingualLines.join('\n');
+      const record = saveFileTranslationToDb(fileName, fileType, sourceLang, targetLang, textContent, translated);
+      return res.json({ 
+        success: true, 
+        translatedText: translated,
+        code: record.code,
+        name: record.name,
+        id: record.id
+      });
     } catch (innerErr) {
-      return res.json({
-        success: true,
-        translatedText: `[موتور محلی]: ترجمه فایل ${fileName} با اندازه فرضی کامل شد.\nمحتوای سرفصل پروژه مگا مال به زبان مقصد با موفقیت حفظ و تدوین شد.`
+      const fallbackText = `[موتور محلی]: ترجمه فایل ${fileName} با اندازه فرضی کامل شد.\nمحتوای سرفصل پروژه مگا مال به زبان مقصد با موفقیت حفظ و تدوین شد.`;
+      const record = saveFileTranslationToDb(fileName, fileType, sourceLang, targetLang, textContent, fallbackText);
+      return res.json({ 
+        success: true, 
+        translatedText: fallbackText,
+        code: record.code,
+        name: record.name,
+        id: record.id
       });
     }
   }
@@ -1285,8 +1686,10 @@ app.post("/api/vote", (req, res) => {
   });
 });
 
-// Initial Construction Projects Database
-let projectsDb = [
+// Persistent database path for projects
+const PROJECTS_DB_PATH = path.join(process.cwd(), "projects_db.json");
+
+const initialProjects = [
   {
     id: "saveh_cement",
     nameFa: "پروژه سیمان سفید ساوه",
@@ -1352,103 +1755,102 @@ let projectsDb = [
     nameFa: "پروژه هتل ۵ ستاره روتانا مشهد",
     nameEn: "Rotana 5-Star Hotel Mashhad",
     location: "خراسان رضوی، مشهد",
-    scope: "احداث سازه بتنی، دیوارهای حائل عمیق و سیستم پایدارسازی گود عظیم هتل بین‌المللی مجلل روتانا مشهد",
+    scope: "احداث سازه بتنی، دیוارهای حائل عمیق و سیستم پایدارسازی گود عظیم هتل بین‌المللی مجلل روتانا مشهد",
     mainTags: ["هتل", "بلندمرتبه", "دیوار حائل", "سازه بتنی"],
     keywordsFa: ["روتانا", "هتل روتانا", "مشهد", "هتل ۵ ستاره", "دیوار حائل", "پایدارسازی گود", "نیلینگ", "آنکراژ", "بتن‌ریزی"],
     keywordsEn: ["rotana", "hotel rotana", "mashhad", "retaining wall", "deep excavation", "shoring", "concrete framing"]
+  },
+  {
+    id: "parand_housing",
+    nameFa: "پروژه اداری مسکونی کارگاه پرند آذرستان",
+    nameEn: "Parand Residential & Office Complex Project",
+    location: "تهران، شهر جدید پرند",
+    scope: "طراحی و ساخت قالب‌های سقف کوبیاکس، تامین مصالح و تجهیزات سقف مجوف بتنی، فونداسیون‌های گسترده و اسکلت بتنی مقاوم پروژه بزرگ پرند",
+    mainTags: ["پرند", "سقف کوبیاکس", "اسکلت بتنی", "کوبیاکس"],
+    keywordsFa: ["پرند", "کارگاه پرند", "سقف کوبیاکس", "کوبیاکس", "سقف مجوف", "اسکلت بتنی", "تامین تجهیزات", "تامین مصالح", "ناظر مقیم", "آذرستان"],
+    keywordsEn: ["parand", "parand project", "cobiax slab", "cobiax", "concrete framing", "equipment procurement", "materials procurement", "azarestan"]
   }
 ];
 
+const loadProjectsDb = () => {
+  try {
+    if (fs.existsSync(PROJECTS_DB_PATH)) {
+      const data = fs.readFileSync(PROJECTS_DB_PATH, "utf-8");
+      return JSON.parse(data);
+    } else {
+      fs.writeFileSync(PROJECTS_DB_PATH, JSON.stringify(initialProjects, null, 2), "utf-8");
+      return initialProjects;
+    }
+  } catch (err) {
+    console.error("Error loading projects DB:", err);
+    return initialProjects;
+  }
+};
+
+const saveProjectsDb = (db: any[]) => {
+  try {
+    fs.writeFileSync(PROJECTS_DB_PATH, JSON.stringify(db, null, 2), "utf-8");
+  } catch (err) {
+    console.error("Error saving projects DB:", err);
+  }
+};
+
+let projectsDb = loadProjectsDb();
+
 // API: Get current list of projects
 app.get("/api/projects", (req, res) => {
-  res.json({ success: true, projects: projectsDb });
+  const db = loadProjectsDb();
+  res.json({ success: true, projects: db });
 });
 
-// API: Search and dynamically sync real projects from Omran Azarestan using Google Search grounding
-app.post("/api/search-and-sync-projects", async (req, res) => {
-  const { searchQuery } = req.body;
-  const finalQuery = searchQuery || "پروژه های جدید شرکت عمران آذرستان در ایران";
-  
-  const ai = getGeminiClient();
-  if (!ai) {
-    return res.status(500).json({ error: "سرویس هوش مصنوعی فعال نیست" });
+// API: Create project (Admin only)
+app.post("/api/projects/create", (req, res) => {
+  const { nameFa, nameEn, location, scope, mainTags, keywordsFa, keywordsEn } = req.body;
+  if (!nameFa || !nameEn) {
+    return res.status(400).json({ error: "نام فارسی و انگلیسی پروژه الزامی است" });
   }
 
-  try {
-    const prompt = `You are an expert researcher with access to real-time Google Search. Your goal is to find actual, real-world civil engineering, construction, building, or industrial projects executed or currently under construction by the Iranian contractor "شرکت عمران آذرستان" (Omran Azarestan) in Iran.
-Query: ${finalQuery}
-
-We currently have these projects in our database:
-${JSON.stringify(projectsDb.map(p => p.nameFa), null, 2)}
-
-Instructions:
-1. Search Google live for real-world projects by "عمران آذرستان". Examples include commercial buildings, factories, industrial plants, infrastructure, etc.
-2. Find 2 to 3 real projects that are NOT already listed above, or provide richer updated data for them.
-3. For each found project, extract:
-   - id: a short slug (e.g., "shariati_hospital" or "gorgan_cement")
-   - nameFa: Persian name (e.g. "بیمارستان شریعتی تهران - ساختمان جدید")
-   - nameEn: English name (e.g. "Shariati Hospital New Building Project")
-   - location: Location in Iran (e.g. "تهران، امیرآباد")
-   - scope: A technical explanation of their contract or work (in Persian, detailed)
-   - mainTags: 3 or 4 relevant engineering tags
-   - keywordsFa: Persian keywords for fuzzy matching
-   - keywordsEn: English keywords for fuzzy matching
-4. Provide the result strictly as a raw JSON array of objects. Do NOT wrap it in markdown backticks. No conversational text.
-`;
-
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: prompt,
-      config: {
-        tools: [{ googleSearch: {} }]
-      }
-    });
-
-    let responseText = response.text ? response.text.trim() : "";
-    if (responseText.startsWith("```")) {
-      responseText = responseText.replace(/^```(json)?\s*/i, "").replace(/\s*```$/, "");
-    }
-    responseText = responseText.trim();
-
-    const newProjects = JSON.parse(responseText);
-    let addedCount = 0;
-
-    if (Array.isArray(newProjects)) {
-      newProjects.forEach((proj: any) => {
-        if (proj.id && proj.nameFa) {
-          // Check if already exists by ID
-          const exists = projectsDb.some(p => p.id === proj.id || p.nameFa === proj.nameFa);
-          if (!exists) {
-            projectsDb.push({
-              id: proj.id,
-              nameFa: proj.nameFa,
-              nameEn: proj.nameEn || proj.id,
-              location: proj.location || "ایران",
-              scope: proj.scope || "",
-              mainTags: proj.mainTags || ["پروژه جدید", "عمران آذرستان"],
-              keywordsFa: proj.keywordsFa || [],
-              keywordsEn: proj.keywordsEn || []
-            });
-            addedCount++;
-          }
-        }
-      });
-    }
-
-    res.json({
-      success: true,
-      message: `تعداد ${addedCount} پروژه واقعی جدید عمران آذرستان در ایران جستجو، استخراج و به بانک اطلاعاتی اضافه شد.`,
-      addedCount,
-      allProjectsCount: projectsDb.length,
-      projects: projectsDb
-    });
-  } catch (err: any) {
-    console.error("Error in search-and-sync-projects:", err);
-    res.status(500).json({
-      success: false,
-      error: `خطا در جستجوی آنلاین پروژه ها: ${err.message}`
-    });
+  const id = nameEn.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || `proj_${Date.now()}`;
+  const db = loadProjectsDb();
+  if (db.some((p: any) => p.id === id || p.nameFa === nameFa)) {
+    return res.status(400).json({ error: "پروژه‌ای با این نام یا شناسه انگلیسی از قبل وجود دارد" });
   }
+
+  const newProject = {
+    id,
+    nameFa,
+    nameEn,
+    location: location || "نامشخص",
+    scope: scope || "",
+    mainTags: Array.isArray(mainTags) ? mainTags : (mainTags ? mainTags.split(",").map((s: string) => s.trim()) : []),
+    keywordsFa: Array.isArray(keywordsFa) ? keywordsFa : (keywordsFa ? keywordsFa.split(",").map((s: string) => s.trim()) : [nameFa]),
+    keywordsEn: Array.isArray(keywordsEn) ? keywordsEn : (keywordsEn ? keywordsEn.split(",").map((s: string) => s.trim()) : [nameEn])
+  };
+
+  db.push(newProject);
+  saveProjectsDb(db);
+  projectsDb = db;
+
+  return res.json({ success: true, project: newProject, projects: db });
+});
+
+// API: Delete project (Admin only)
+app.post("/api/projects/delete", (req, res) => {
+  const { id } = req.body;
+  if (!id) {
+    return res.status(400).json({ error: "شناسه پروژه الزامی است" });
+  }
+
+  const db = loadProjectsDb();
+  const filtered = db.filter((p: any) => p.id !== id);
+  if (db.length === filtered.length) {
+    return res.status(404).json({ error: "پروژه یافت نشد" });
+  }
+
+  saveProjectsDb(filtered);
+  projectsDb = filtered;
+
+  return res.json({ success: true, message: "پروژه با موفقیت حذف شد", projects: filtered });
 });
 
 // API: Smart construction project tagging route utilizing semantic similarity & heuristics
@@ -1498,15 +1900,7 @@ Schema:
       });
 
       let responseText = response.text ? response.text.trim() : "";
-      if (responseText.startsWith("```json")) {
-        responseText = responseText.substring(7);
-      }
-      if (responseText.endsWith("```")) {
-        responseText = responseText.substring(0, responseText.length - 3);
-      }
-      responseText = responseText.trim();
-
-      const parsedResults = JSON.parse(responseText);
+      const parsedResults = parseGeminiJson(responseText);
       const normalizedResults = parsedResults.map((pr: any) => {
         const fullProj = projectsDb.find(kp => kp.id === pr.id);
         return {

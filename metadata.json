@@ -1,6 +1,6 @@
 {
-  "name": "Remix: Enterprise Multilingual Translation Platform",
-  "description": "سامانه جامع ترجمه چندزبانه سازمانی تخصصی عمران و ساخت و ساز با ترجمه متون، اسناد، گفتار، نویسه‌خوان (OCR) و مدیریت واژه‌نامه تخصصی",
+  "name": "آذرستان مترجم",
+  "description": "سامانه ترجمه تخصصی مهندسی عمران و پروژه های عمرانی شرکت عمران آذرستان",
   "requestFramePermissions": [
     "microphone"
   ],
