@@ -25,10 +25,137 @@ import {
   LogOut
 } from "lucide-react";
 
-export function AdminSetupGuide() {
-  const [adminTab, setAdminTab] = useState<"dashboard" | "docs">("dashboard");
+import { ADUser } from "../types";
+
+export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
+  const [adminTab, setAdminTab] = useState<"users" | "dashboard" | "docs" >("users");
   const [activeStep, setActiveStep] = useState<number>(1);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  // Active Directory Users state
+  const [adUsers, setAdUsers] = useState<any[]>([]);
+  const [isLoadingUsers, setIsLoadingUsers] = useState(false);
+
+  // New User Form States
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [newUsername, setNewUsername] = useState("");
+  const [newName, setNewName] = useState("");
+  const [newEmail, setNewEmail] = useState("");
+  const [newDepartment, setNewDepartment] = useState("");
+  const [newRole, setNewRole] = useState<"Admin" | "Translator" | "DeptManager" | "User">("User");
+  const [newAllowedIp, setNewAllowedIp] = useState("");
+  const [newCanTranslate, setNewCanTranslate] = useState(true);
+  const [newCanDefineTerms, setNewCanDefineTerms] = useState(true);
+  const [isCreatingUser, setIsCreatingUser] = useState(false);
+
+  const fetchAdUsers = async () => {
+    setIsLoadingUsers(true);
+    try {
+      const res = await fetch("/api/admin/users");
+      const data = await res.json();
+      if (data.success) {
+        setAdUsers(data.users || []);
+      }
+    } catch (e) {
+      console.error("Error fetching AD users:", e);
+    } finally {
+      setIsLoadingUsers(false);
+    }
+  };
+
+  const updateAdUser = async (username: string, updates: any) => {
+    try {
+      const res = await fetch("/api/admin/users/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, requester: currentUser?.username, ...updates })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setAdUsers(prev => prev.map(u => u.username === username ? { ...u, ...data.user } : u));
+      } else {
+        alert(data.error || "خطا در بروزرسانی تنظیمات کاربر");
+      }
+    } catch (err) {
+      console.error("Error updating user:", err);
+      alert("خطای ارتباط با سرور");
+    }
+  };
+
+  const handleCreateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newUsername.trim() || !newName.trim()) {
+      alert("نام کاربری و نام و نام خانوادگی الزامی هستند.");
+      return;
+    }
+    setIsCreatingUser(true);
+    try {
+      const res = await fetch("/api/admin/users/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: newUsername,
+          name: newName,
+          email: newEmail,
+          department: newDepartment,
+          role: newRole,
+          allowedIp: newAllowedIp,
+          canTranslate: newCanTranslate,
+          canDefineTerms: newCanDefineTerms,
+          requester: currentUser?.username
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setAdUsers(prev => [...prev, data.user]);
+        // Reset form
+        setNewUsername("");
+        setNewName("");
+        setNewEmail("");
+        setNewDepartment("");
+        setNewRole("User");
+        setNewAllowedIp("");
+        setNewCanTranslate(true);
+        setNewCanDefineTerms(true);
+        setShowAddForm(false);
+        alert(`کاربر سازمانی جدید (${data.user.name}) با موفقیت به شبکه اضافه شد.`);
+      } else {
+        alert(data.error || "خطا در ایجاد کاربر جدید");
+      }
+    } catch (err) {
+      console.error(err);
+      alert("خطای ارتباط با سرور");
+    } finally {
+      setIsCreatingUser(false);
+    }
+  };
+
+  const handleDeleteUser = async (username: string) => {
+    if (username.toLowerCase() === "support") {
+      alert("امکان حذف یوزر ارشد پشتیبان وجود ندارد.");
+      return;
+    }
+    if (!window.confirm(`آیا از حذف کاربر "${username}" اطمینان کامل دارید؟ دسترسی او به سامانه به طور کامل لغو خواهد شد.`)) {
+      return;
+    }
+    try {
+      const res = await fetch("/api/admin/users/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, requester: currentUser?.username })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setAdUsers(prev => prev.filter(u => u.username !== username));
+        alert("کاربر مورد نظر با موفقیت حذف گردید.");
+      } else {
+        alert(data.error || "خطا در حذف کاربر");
+      }
+    } catch (err) {
+      console.error(err);
+      alert("خطای ارتباط با سرور");
+    }
+  };
   
   // Projects State
   const [projects, setProjects] = useState<any[]>([]);
@@ -100,10 +227,12 @@ export function AdminSetupGuide() {
   useEffect(() => {
     fetchProjects();
     fetchSessions();
+    fetchAdUsers();
     
-    // Poll sessions every 10 seconds to keep track of active durations
+    // Poll sessions and users every 10 seconds to keep track of active statuses
     const interval = setInterval(() => {
       fetchSessions();
+      fetchAdUsers();
     }, 10000);
 
     return () => clearInterval(interval);
@@ -270,10 +399,16 @@ export function AdminSetupGuide() {
         </div>
         <div className="flex bg-slate-800 rounded-lg p-1 border border-slate-700 font-bold text-xs">
           <button
+            onClick={() => setAdminTab("users")}
+            className={`px-4 py-2 rounded-md transition-all cursor-pointer ${adminTab === "users" ? "bg-indigo-600 text-white" : "text-slate-400 hover:text-white"}`}
+          >
+            مدیریت و دسترسی کاربران
+          </button>
+          <button
             onClick={() => setAdminTab("dashboard")}
             className={`px-4 py-2 rounded-md transition-all cursor-pointer ${adminTab === "dashboard" ? "bg-indigo-600 text-white" : "text-slate-400 hover:text-white"}`}
           >
-            داشبورد نظارت و تعریف پروژه
+            تعریف پروژه و لاگ نشست‌ها
           </button>
           <button
             onClick={() => setAdminTab("docs")}
@@ -283,6 +418,383 @@ export function AdminSetupGuide() {
           </button>
         </div>
       </div>
+
+      {adminTab === "users" && (
+        <div className="space-y-6 animate-fade-in text-right">
+          <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 sm:p-6 shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-4 mb-4 border-b border-slate-200 pb-3">
+              <div className="flex items-center gap-2">
+                <Users className="h-5 w-5 text-indigo-600 animate-pulse" />
+                <div>
+                  <h3 className="font-black text-slate-800 text-sm">مدیریت کاربران سازمانی و سطوح دسترسی شبکه (Active Directory Integration)</h3>
+                  <p className="text-[10px] text-slate-400 font-bold">تعیین کاربران مجاز به ورود، اعمال محدودیت IP و تخصیص دسترسی‌های ترجمه و دیکشنری</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {currentUser?.username?.toLowerCase() === "support" && (
+                  <button
+                    onClick={() => setShowAddForm(!showAddForm)}
+                    className="text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold px-3 py-1.5 rounded-lg transition-all flex items-center gap-1 cursor-pointer shadow-sm"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    {showAddForm ? "بستن فرم تعریف کاربر" : "تعریف کاربر جدید"}
+                  </button>
+                )}
+                <button
+                  onClick={fetchAdUsers}
+                  disabled={isLoadingUsers}
+                  className="text-[10px] bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold px-3 py-1.5 rounded-lg transition-all flex items-center gap-1 cursor-pointer"
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${isLoadingUsers ? "animate-spin" : ""}`} />
+                  بروزرسانی لیست کاربران
+                </button>
+              </div>
+            </div>
+
+            {/* Create New User Form (SUPPORT ONLY) */}
+            {currentUser?.username?.toLowerCase() === "support" && showAddForm && (
+              <form onSubmit={handleCreateUser} className="bg-white border border-indigo-100 rounded-xl p-4 mb-5 text-right space-y-4 shadow-md animate-fade-in">
+                <div className="flex items-center gap-2 text-indigo-700 font-black text-xs pb-2 border-b border-indigo-50">
+                  <Plus className="h-4 w-4 text-emerald-600" />
+                  <span>تعریف کاربر جدید در پایگاه داده شبکه (Active Directory Fallback Database)</span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[10px] text-slate-500 font-bold">نام کاربری (مبنای ورود):</label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="مثال: m.ahmadi"
+                      value={newUsername}
+                      onChange={(e) => setNewUsername(e.target.value)}
+                      className="bg-slate-50 border border-slate-200 rounded-lg p-2 text-xs font-mono text-left focus:bg-white focus:ring-1 focus:ring-indigo-500"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[10px] text-slate-500 font-bold">نام و نام خانوادگی کامل:</label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="مثال: محمد احمدی"
+                      value={newName}
+                      onChange={(e) => setNewName(e.target.value)}
+                      className="bg-slate-50 border border-slate-200 rounded-lg p-2 text-xs font-bold focus:bg-white focus:ring-1 focus:ring-indigo-500"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[10px] text-slate-500 font-bold">ایمیل سازمانی:</label>
+                    <input
+                      type="email"
+                      placeholder="مثال: m.ahmadi@omran-azarestan.com"
+                      value={newEmail}
+                      onChange={(e) => setNewEmail(e.target.value)}
+                      className="bg-slate-50 border border-slate-200 rounded-lg p-2 text-xs font-mono text-left focus:bg-white focus:ring-1 focus:ring-indigo-500"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[10px] text-slate-500 font-bold">بخش / دپارتمان:</label>
+                    <input
+                      type="text"
+                      placeholder="مثال: کارگاه پروژه عمران پرند"
+                      value={newDepartment}
+                      onChange={(e) => setNewDepartment(e.target.value)}
+                      className="bg-slate-50 border border-slate-200 rounded-lg p-2 text-xs font-bold focus:bg-white focus:ring-1 focus:ring-indigo-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 pt-2">
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[10px] text-slate-500 font-bold">نقش سیستمی:</label>
+                    <select
+                      value={newRole}
+                      onChange={(e) => setNewRole(e.target.value as any)}
+                      className="bg-slate-50 border border-slate-200 rounded-lg p-2 text-xs font-bold focus:bg-white focus:ring-1 focus:ring-indigo-500"
+                    >
+                      <option value="User">کاربر ساده (User)</option>
+                      <option value="Translator">مترجم تخصصی (Translator)</option>
+                      <option value="DeptManager">مدیر دپارتمان (DeptManager)</option>
+                      <option value="Admin">مدیر سیستم (Admin)</option>
+                    </select>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[10px] text-slate-500 font-bold">محدودیت IP اختصاصی:</label>
+                    <input
+                      type="text"
+                      placeholder="بدون محدودیت IP"
+                      value={newAllowedIp}
+                      onChange={(e) => setNewAllowedIp(e.target.value)}
+                      className="bg-slate-50 border border-slate-200 rounded-lg p-2 text-xs font-mono text-left focus:bg-white focus:ring-1 focus:ring-indigo-500"
+                    />
+                  </div>
+                  <div className="flex items-center gap-2 h-full pt-4">
+                    <input
+                      type="checkbox"
+                      id="newCanTranslate"
+                      checked={newCanTranslate}
+                      onChange={(e) => setNewCanTranslate(e.target.checked)}
+                      className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-slate-300 rounded cursor-pointer"
+                    />
+                    <label htmlFor="newCanTranslate" className="text-xs text-slate-700 font-bold cursor-pointer">مجاز به ترجمه تخصصی</label>
+                  </div>
+                  <div className="flex items-center gap-2 h-full pt-4">
+                    <input
+                      type="checkbox"
+                      id="newCanDefineTerms"
+                      checked={newCanDefineTerms}
+                      onChange={(e) => setNewCanDefineTerms(e.target.checked)}
+                      className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-slate-300 rounded cursor-pointer"
+                    />
+                    <label htmlFor="newCanDefineTerms" className="text-xs text-slate-700 font-bold cursor-pointer">مجاز به تعریف اصطلاح</label>
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={() => setShowAddForm(false)}
+                    className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold px-4 py-2 rounded-lg cursor-pointer transition-all"
+                  >
+                    انصراف
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isCreatingUser}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black px-5 py-2 rounded-lg flex items-center gap-1.5 cursor-pointer transition-all shadow-sm"
+                  >
+                    {isCreatingUser ? (
+                      <>
+                        <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                        <span>در حال ایجاد...</span>
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle className="h-4 w-4" />
+                        <span>ایجاد حساب سازمانی جدید</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            )}
+
+            <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+              <table className="w-full text-right text-xs">
+                <thead className="bg-slate-100 text-slate-700 border-b border-slate-200">
+                  <tr>
+                    <th className="p-3 font-bold">کاربر اکتیودایرکتوری</th>
+                    <th className="p-3 font-bold">بخش / دپارتمان</th>
+                    <th className="p-3 font-bold">نقش سیستمی</th>
+                    <th className="p-3 font-bold text-center">وضعیت دسترسی</th>
+                    <th className="p-3 font-bold">محدودیت IP اختصاصی</th>
+                    <th className="p-3 font-bold text-center">نقش مترجم</th>
+                    <th className="p-3 font-bold text-center">تعریف واژه</th>
+                    <th className="p-3 font-bold text-center">اقدامات</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 text-slate-600 font-bold">
+                  {adUsers.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="p-8 text-center text-xs text-slate-400 font-bold">
+                        در حال بارگذاری لیست کاربران شبکه عمران آذرستان...
+                      </td>
+                    </tr>
+                  ) : (
+                    adUsers.map((user) => {
+                      const isSupport = currentUser?.username?.toLowerCase() === "support";
+                      return (
+                        <tr key={user.username} className="hover:bg-indigo-50/20 transition-all font-semibold">
+                          
+                          {/* Active Directory User */}
+                          <td className="p-3">
+                            {isSupport ? (
+                              <div className="flex flex-col gap-1 max-w-[200px]">
+                                <input
+                                  type="text"
+                                  value={user.name || ""}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    setAdUsers(prev => prev.map(u => u.username === user.username ? { ...u, name: val } : u));
+                                  }}
+                                  onBlur={(e) => updateAdUser(user.username, { name: e.target.value })}
+                                  className="bg-slate-50 border border-slate-200 rounded px-2 py-1 text-xs font-bold focus:bg-white focus:ring-1 focus:ring-indigo-500 text-right w-full"
+                                  placeholder="نام کاربر"
+                                />
+                                <div className="flex items-center gap-1">
+                                  <span className="text-[9px] font-mono text-slate-400 bg-slate-100 px-1 py-0.5 rounded shrink-0">{user.username}</span>
+                                  <input
+                                    type="text"
+                                    value={user.email || ""}
+                                    onChange={(e) => {
+                                      const val = e.target.value;
+                                      setAdUsers(prev => prev.map(u => u.username === user.username ? { ...u, email: val } : u));
+                                    }}
+                                    onBlur={(e) => updateAdUser(user.username, { email: e.target.value })}
+                                    className="bg-slate-50 border border-slate-200 rounded px-1.5 py-0.5 text-[9px] font-mono text-left focus:bg-white focus:ring-1 focus:ring-indigo-500 w-full"
+                                    dir="ltr"
+                                    placeholder="ایمیل"
+                                  />
+                                </div>
+                              </div>
+                            ) : (
+                              <div>
+                                <div className="font-black text-slate-800">{user.name}</div>
+                                <div className="text-[9px] text-slate-400 font-mono tracking-wide mt-0.5" dir="ltr">{user.username} | {user.email}</div>
+                              </div>
+                            )}
+                          </td>
+                          
+                          {/* Department */}
+                          <td className="p-3">
+                            {isSupport ? (
+                              <input
+                                type="text"
+                                value={user.department || ""}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setAdUsers(prev => prev.map(u => u.username === user.username ? { ...u, department: val } : u));
+                                }}
+                                onBlur={(e) => updateAdUser(user.username, { department: e.target.value })}
+                                className="bg-slate-50 border border-slate-200 rounded px-2 py-1 text-xs font-bold focus:bg-white focus:ring-1 focus:ring-indigo-500 text-right w-36"
+                                placeholder="دپارتمان"
+                              />
+                            ) : (
+                              <span className="text-slate-500 font-bold">{user.department}</span>
+                            )}
+                          </td>
+
+                          {/* System Role */}
+                          <td className="p-3">
+                            {isSupport ? (
+                              <select
+                                value={user.role || "User"}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setAdUsers(prev => prev.map(u => u.username === user.username ? { ...u, role: val } : u));
+                                  updateAdUser(user.username, { role: val });
+                                }}
+                                className="bg-slate-50 border border-slate-200 rounded px-2 py-1 text-xs font-bold focus:bg-white focus:ring-1 focus:ring-indigo-500 w-24"
+                              >
+                                <option value="User">User</option>
+                                <option value="Translator">Translator</option>
+                                <option value="DeptManager">DeptManager</option>
+                                <option value="Admin">Admin</option>
+                              </select>
+                            ) : (
+                              <span className={`px-2 py-0.5 rounded text-[10px] font-black ${
+                                user.role === "Admin" ? "bg-purple-100 text-purple-700" :
+                                user.role === "Translator" ? "bg-indigo-100 text-indigo-700" :
+                                user.role === "DeptManager" ? "bg-amber-100 text-amber-700" :
+                                "bg-slate-100 text-slate-600"
+                              }`}>
+                                {user.role}
+                              </span>
+                            )}
+                          </td>
+                          
+                          {/* Authorized Toggle */}
+                          <td className="p-3 text-center">
+                            <button
+                              onClick={() => updateAdUser(user.username, { authorized: user.authorized === false ? true : false })}
+                              disabled={!isSupport}
+                              className={`px-3 py-1.5 rounded-lg text-[10px] font-black transition-all border ${
+                                isSupport ? "cursor-pointer" : "cursor-not-allowed opacity-80"
+                              } ${
+                                user.authorized !== false
+                                  ? "bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100"
+                                  : "bg-red-50 text-red-700 border-red-200 hover:bg-red-100"
+                              }`}
+                              type="button"
+                            >
+                              {user.authorized !== false ? "✔ کاربر مجاز" : "❌ مسدود شده"}
+                            </button>
+                          </td>
+
+                          {/* Allowed IP Input */}
+                          <td className="p-3">
+                            <input
+                              type="text"
+                              value={user.allowedIp || ""}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setAdUsers(prev => prev.map(u => u.username === user.username ? { ...u, allowedIp: val } : u));
+                              }}
+                              onBlur={(e) => updateAdUser(user.username, { allowedIp: e.target.value })}
+                              disabled={!isSupport}
+                              placeholder="بدون محدودیت IP"
+                              className={`w-32 bg-slate-50 border border-slate-200 rounded-lg text-[10px] font-mono px-2 py-1 focus:bg-white focus:ring-1 focus:ring-indigo-500 text-left ${
+                                !isSupport ? "cursor-not-allowed opacity-80" : ""
+                              }`}
+                              dir="ltr"
+                            />
+                          </td>
+
+                          {/* Translator Access Toggle */}
+                          <td className="p-3 text-center">
+                            <button
+                              onClick={() => updateAdUser(user.username, { canTranslate: user.canTranslate === false ? true : false })}
+                              disabled={!isSupport}
+                              className={`px-2 py-1 rounded-md text-[10px] font-black transition-all ${
+                                isSupport ? "cursor-pointer" : "cursor-not-allowed opacity-80"
+                              } ${
+                                user.canTranslate !== false
+                                  ? "bg-indigo-50 text-indigo-700 border border-indigo-100 hover:bg-indigo-100"
+                                  : "bg-slate-50 text-slate-400 border border-slate-200 hover:bg-slate-100"
+                              }`}
+                              type="button"
+                            >
+                              {user.canTranslate !== false ? "مترجم مجاز" : "فاقد دسترسی"}
+                            </button>
+                          </td>
+
+                          {/* Dictionary Definition Toggle */}
+                          <td className="p-3 text-center">
+                            <button
+                              onClick={() => updateAdUser(user.username, { canDefineTerms: user.canDefineTerms === false ? true : false })}
+                              disabled={!isSupport}
+                              className={`px-2 py-1 rounded-md text-[10px] font-black transition-all ${
+                                isSupport ? "cursor-pointer" : "cursor-not-allowed opacity-80"
+                              } ${
+                                user.canDefineTerms !== false
+                                  ? "bg-cyan-50 text-cyan-700 border border-cyan-100 hover:bg-cyan-100"
+                                  : "bg-slate-50 text-slate-400 border border-slate-200 hover:bg-slate-100"
+                              }`}
+                              type="button"
+                            >
+                              {user.canDefineTerms !== false ? "امکان تعریف واژه" : "فاقد دسترسی"}
+                            </button>
+                          </td>
+
+                          {/* Actions / Delete */}
+                          <td className="p-3 text-center">
+                            {isSupport ? (
+                              <button
+                                onClick={() => handleDeleteUser(user.username)}
+                                disabled={user.username.toLowerCase() === "support"}
+                                className={`p-1.5 rounded-lg text-red-600 hover:bg-red-50 border border-transparent hover:border-red-100 transition-all cursor-pointer ${
+                                  user.username.toLowerCase() === "support" ? "cursor-not-allowed opacity-30" : ""
+                                }`}
+                                title="حذف کاربر"
+                                type="button"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            ) : (
+                              <span className="text-[9px] text-emerald-600 font-extrabold bg-emerald-50 border border-emerald-100 px-2 py-0.5 rounded">
+                                ذخیره خودکار
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
 
       {adminTab === "dashboard" ? (
         <div className="space-y-8 animate-fade-in text-right">

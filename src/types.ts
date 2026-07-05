@@ -8,6 +8,11 @@ export interface ADUser {
   role: Role;
   active: boolean;
   lastActive: string;
+  authorized?: boolean;
+  allowedIp?: string;
+  canTranslate?: boolean;
+  canDefineTerms?: boolean;
+  computerName?: string;
 }
 
 export type TranslationEngineType = 'NLLB-200' | 'MarianMT' | 'LibreTranslate' | 'SeamlessM4T' | 'OpenAI' | 'DeepL' | 'Azure' | 'GoogleCloud';
@@ -52,6 +57,7 @@ export interface TranslationRecord {
   symbolsCount: number;
   durationMs: number;
   project?: string;
+  status?: 'Ready' | 'Pending';
 }
 
 export interface FileJob {

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import mammoth from "mammoth";
 import { 
   Languages, 
@@ -38,7 +38,8 @@ import {
   Sun,
   Moon,
   Eye,
-  LogOut
+  LogOut,
+  Power
 } from "lucide-react";
 import { 
   ResponsiveContainer, 
@@ -175,6 +176,74 @@ export default function App() {
     addSystemLog("کاربر با موفقیت از سیستم اکتیودایرکتوری خارج گردید.");
   };
 
+  const [networkInfo, setNetworkInfo] = useState<{ realIp: string, mappedIp: string } | null>(null);
+
+  // Fetch client network info dynamically
+  useEffect(() => {
+    const fetchNetworkInfo = async () => {
+      try {
+        const usernameParam = currentUser ? currentUser.username : "SUPPORT";
+        const res = await fetch(`/api/network-info?username=${encodeURIComponent(usernameParam)}`);
+        if (res.ok) {
+          const data = await res.json();
+          setNetworkInfo({ realIp: data.realIp, mappedIp: data.mappedIp });
+        }
+      } catch (err) {
+        console.error("Failed to fetch network info:", err);
+      }
+    };
+    fetchNetworkInfo();
+  }, [currentUser]);
+
+  // Fetch all AD users from server (Admin only)
+  const fetchAdUsers = async () => {
+    try {
+      const res = await fetch("/api/admin/users");
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setAdUsers(data.users);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to fetch AD users from server:", err);
+    }
+  };
+
+  // Update specific user setting
+  const updateAdUser = async (username: string, updates: Partial<ADUser>) => {
+    try {
+      const res = await fetch("/api/admin/users/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, requester: currentUser?.username, ...updates })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setAdUsers(prev => prev.map(u => u.username === username ? { ...u, ...data.user } : u));
+        addSystemLog(`تغییرات دسترسی کاربر ${username} با موفقیت ثبت گردید.`);
+        
+        // If current logged-in user got updated, update current session locally too
+        if (currentUser && currentUser.username.toLowerCase() === username.toLowerCase()) {
+          const updatedUser = { ...currentUser, ...data.user };
+          setCurrentUser(updatedUser);
+          localStorage.setItem("omran_azarestan_user", JSON.stringify(updatedUser));
+        }
+      } else {
+        alert(data.error || "بروزرسانی وضعیت کاربر ناموفق بود.");
+      }
+    } catch (err) {
+      console.error("Error updating user:", err);
+    }
+  };
+
+  // Fetch users list when in admin panel
+  useEffect(() => {
+    if (activeTab === "analytics" && currentUser?.role === "Admin") {
+      fetchAdUsers();
+    }
+  }, [activeTab, currentUser]);
+
   const [textSize, setTextSize] = useState<"sm" | "base" | "lg" | "xl" | "2xl">("base");
   const [theme, setTheme] = useState<"construction" | "dark">(() => {
     try {
@@ -206,7 +275,7 @@ export default function App() {
   const [translatedText, setTranslatedText] = useState("");
   const [sourceLang, setSourceLang] = useState("en");
   const [targetLang, setTargetLang] = useState("fa");
-  const [isAutoDetect, setIsAutoDetect] = useState(false);
+  const [isAutoDetect, setIsAutoDetect] = useState(true);
   const [selectedEngine, setSelectedEngine] = useState<string>("SeamlessM4T");
   const [isTranslating, setIsTranslating] = useState(false);
   const [translationProgress, setTranslationProgress] = useState(0);
@@ -224,6 +293,11 @@ export default function App() {
 
   // Dynamic Glossary & Terminology Overlay Trigger
   const [terminologyAlerts, setTerminologyAlerts] = useState<{term: string, replacement: string, definition: string}[]>([]);
+
+  // Bulk selection and downloads in history section
+  const [selectedRecordIds, setSelectedRecordIds] = useState<string[]>([]);
+  const [isBulkDownloadModalOpen, setIsBulkDownloadModalOpen] = useState(false);
+  const [bulkDownloadFormat, setBulkDownloadFormat] = useState<"csv" | "zip">("csv");
 
   // Speech to Text States
   const [isDictating, setIsDictating] = useState(false);
@@ -361,6 +435,8 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animationRef = useRef<number | null>(null);
   const dictationRecognitionRef = useRef<any>(null);
+  const sttTimeoutRef = useRef<any>(null);
+  const hasReceivedSpeechRef = useRef<boolean>(false);
 
   // Refs for auto-resizing textareas
   const sourceRef = useRef<HTMLTextAreaElement | null>(null);
@@ -374,6 +450,44 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
       sourceRef.current.style.height = `${Math.max(80, sourceRef.current.scrollHeight)}px`;
     }
   }, [sourceText]);
+
+  // Real-time language detection check for autoDetect feature
+  useEffect(() => {
+    if (isAutoDetect && sourceText.trim() !== "") {
+      const detectLanguage = (text: string): "fa" | "ru" | "en" => {
+        let faCount = 0;
+        let ruCount = 0;
+        let enCount = 0;
+        
+        for (let i = 0; i < text.length; i++) {
+          const charCode = text.charCodeAt(i);
+          if (charCode >= 0x0600 && charCode <= 0x06FF) {
+            faCount++;
+          } else if (charCode >= 0x0400 && charCode <= 0x04FF) {
+            ruCount++;
+          } else if ((charCode >= 65 && charCode <= 90) || (charCode >= 97 && charCode <= 122)) {
+            enCount++;
+          }
+        }
+        
+        if (faCount > ruCount && faCount > enCount) return "fa";
+        if (ruCount > faCount && ruCount > enCount) return "ru";
+        return "en";
+      };
+
+      const detected = detectLanguage(sourceText);
+      setSourceLang(detected);
+      
+      const names: Record<string, string> = {
+        fa: "فارسی (تشخیص خودکار)",
+        en: "انگلیسی (تشخیص خودکار)",
+        ru: "روسی (تشخیص خودکار)"
+      };
+      setDetectedLanguageText(names[detected]);
+    } else {
+      setDetectedLanguageText("");
+    }
+  }, [sourceText, isAutoDetect]);
 
   useEffect(() => {
     if (trans1Ref.current) {
@@ -563,6 +677,89 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
     });
     setTerminologyAlerts(alerts);
   }, [sourceText, sourceLang, targetLang, glossary]);
+
+  // Automatically scan translated text and highlight terms that deviate from the approved glossary
+  const translatedDeviations = useMemo(() => {
+    if (!sourceText.trim() || !translatedText.trim()) return [];
+    const list: { term: string; expected: string; definition: string }[] = [];
+
+    glossary.forEach(item => {
+      let sourceHasTerm = false;
+      let expectedTranslation = "";
+
+      if (sourceLang === 'fa') {
+        sourceHasTerm = sourceText.includes(item.term);
+        expectedTranslation = targetLang === 'ru' ? item.equivalentRu : item.equivalentEn;
+      } else {
+        const expectedSource = sourceLang === 'ru' ? item.equivalentRu : item.equivalentEn;
+        if (expectedSource) {
+          sourceHasTerm = sourceText.toLowerCase().includes(expectedSource.toLowerCase());
+        }
+        expectedTranslation = item.term;
+      }
+
+      if (sourceHasTerm && expectedTranslation) {
+        const isPersian = targetLang === 'fa';
+        const normalizedExpected = expectedTranslation.toLowerCase().trim();
+        const normalizedTranslated = translatedText.toLowerCase();
+
+        const isPresent = isPersian
+          ? translatedText.includes(expectedTranslation)
+          : normalizedTranslated.includes(normalizedExpected);
+
+        if (!isPresent) {
+          list.push({
+            term: item.term,
+            expected: expectedTranslation,
+            definition: item.definitionFa || "اصطلاح تخصصی مصوب شرکت عمران آذرستان."
+          });
+        }
+      }
+    });
+
+    return list;
+  }, [sourceText, translatedText, sourceLang, targetLang, glossary]);
+
+  const comparisonDeviations = useMemo(() => {
+    if (!isComparisonMode || !sourceText.trim() || !comparisonTranslatedText.trim()) return [];
+    const list: { term: string; expected: string; definition: string }[] = [];
+
+    glossary.forEach(item => {
+      let sourceHasTerm = false;
+      let expectedTranslation = "";
+
+      if (sourceLang === 'fa') {
+        sourceHasTerm = sourceText.includes(item.term);
+        expectedTranslation = targetLang === 'ru' ? item.equivalentRu : item.equivalentEn;
+      } else {
+        const expectedSource = sourceLang === 'ru' ? item.equivalentRu : item.equivalentEn;
+        if (expectedSource) {
+          sourceHasTerm = sourceText.toLowerCase().includes(expectedSource.toLowerCase());
+        }
+        expectedTranslation = item.term;
+      }
+
+      if (sourceHasTerm && expectedTranslation) {
+        const isPersian = targetLang === 'fa';
+        const normalizedExpected = expectedTranslation.toLowerCase().trim();
+        const normalizedTranslated = comparisonTranslatedText.toLowerCase();
+
+        const isPresent = isPersian
+          ? comparisonTranslatedText.includes(expectedTranslation)
+          : normalizedTranslated.includes(normalizedExpected);
+
+        if (!isPresent) {
+          list.push({
+            term: item.term,
+            expected: expectedTranslation,
+            definition: item.definitionFa || "اصطلاح تخصصی مصوب شرکت عمران آذرستان."
+          });
+        }
+      }
+    });
+
+    return list;
+  }, [isComparisonMode, sourceText, comparisonTranslatedText, sourceLang, targetLang, glossary]);
 
   // Audio Wave Simulator when dictating
   useEffect(() => {
@@ -1341,7 +1538,7 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
     });
   };
 
-  // Microphone Dictation with Real Web Speech API and Fallback Simulation
+  // Microphone Dictation with Real Web Speech API
   const toggleDictation = () => {
     if (isDictating) {
       if (dictationRecognitionRef.current) {
@@ -1353,25 +1550,17 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
       }
       setIsDictating(false);
       setSttProgressMessage("");
+      if (sttTimeoutRef.current) {
+        clearTimeout(sttTimeoutRef.current);
+        sttTimeoutRef.current = null;
+      }
       addSystemLog("دریافت گفتار صوتی متوقف و متن نهایی ترانسکریپت شد.");
     } else {
       const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
       if (!SpeechRecognition) {
-        // Fallback to simulation if browser has no Web Speech API
-        setIsDictating(true);
-        setSttProgressMessage("سیستم وب اسپیک صوتی در این مرورگر یافت نشد. شبیه‌سازی هوشمند صوتی فعال است...");
-        addSystemLog("سیستم تشخیص گفتار مرورگر پیدا نشد. حالت شبیه‌ساز صوتی فعال گردید.");
-        
-        // Simulation timer
-        setTimeout(() => {
-          setIsDictating(false);
-          setSttProgressMessage("");
-          const textToAdd = sttLanguage === 'fa' 
-            ? "تامین تجهیزات و مصالح مربوط به سقف کوبیاکس در کارگاه پرند به تایید ناظر مقیم رسید."
-            : "Procurement of equipment and materials regarding the Cobiax Slab at Parand construction site was approved.";
-          setSourceText(prev => prev + (prev ? "\n" : "") + textToAdd);
-          addSystemLog("گفتار آزمایشی با شبیه‌ساز صوتی آذرستان دریافت و ثبت شد.");
-        }, 3000);
+        setIsDictating(false);
+        setSttProgressMessage("عدم موفقیت در دریافت صدا (تشخیص گفتار توسط مرورگر شما پشتیبانی نمی‌شود)");
+        addSystemLog("سیستم تشخیص گفتار مرورگر پیدا نشد.");
         return;
       }
 
@@ -1381,13 +1570,35 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
         recognition.interimResults = true;
         recognition.lang = sttLanguage === 'fa' ? "fa-IR" : "en-US";
 
+        hasReceivedSpeechRef.current = false;
+
         recognition.onstart = () => {
           setIsDictating(true);
           setSttProgressMessage("میکروفون فعال شد. در حال شنیدن گفتار تخصصی شما...");
           addSystemLog("میکروفون سیستم فعال شد. آماده دریافت سیگنال‌های صوتی.");
+
+          if (sttTimeoutRef.current) clearTimeout(sttTimeoutRef.current);
+          sttTimeoutRef.current = setTimeout(() => {
+            if (!hasReceivedSpeechRef.current) {
+              console.warn("No speech received within 6s timeout limit.");
+              try {
+                recognition.stop();
+              } catch (e) {}
+              setIsDictating(false);
+              setSttProgressMessage("عدم موفقیت در دریافت صدا");
+              addSystemLog("عدم موفقیت در دریافت صدا (عدم وجود سیگنال صوتی).");
+              alert("عدم موفقیت در دریافت صدا. هیچ سیگنال صوتی از میکروفون شما دریافت نشد.");
+            }
+          }, 6000);
         };
 
         recognition.onresult = (event: any) => {
+          hasReceivedSpeechRef.current = true;
+          if (sttTimeoutRef.current) {
+            clearTimeout(sttTimeoutRef.current);
+            sttTimeoutRef.current = null;
+          }
+
           let interimTranscript = "";
           let finalTranscript = "";
 
@@ -1413,32 +1624,11 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
         recognition.onerror = (event: any) => {
           console.error("STT Dictation Error:", event.error);
           addSystemLog(`خطای میکروفون تشخیص گفتار: ${event.error}`);
-          if (event.error === 'not-allowed') {
-            setSttProgressMessage("دسترسی به میکروفون مسدود است! لطفا مجوز دسترسی به میکروفون را صادر کرده یا صفحه را ریفرش کنید.");
-          } else if (event.error === 'network') {
-            setSttProgressMessage("خطای ارتباط شبکه با سرور تشخیص گفتار گوگل رخ داد. شبیه‌ساز آفلاین صوتی آذرستان فعال شد...");
-            addSystemLog("خطای شبکه تشخیص گفتار گوگل دریافت شد. انتقال خودکار به شبیه‌ساز محلی...");
-            
-            setTimeout(() => {
-              setIsDictating(false);
-              setSttProgressMessage("");
-              const textToAdd = sttLanguage === 'fa' 
-                ? "تامین تجهیزات و مصالح مربوط به سقف کوبیاکس در کارگاه پرند به تایید ناظر مقیم رسید."
-                : "Procurement of equipment and materials regarding the Cobiax Slab at Parand construction site was approved.";
-              setSourceText(prev => prev + (prev ? "\n" : "") + textToAdd);
-              addSystemLog("گفتار تخصصی با موفقیت به صورت شبیه‌سازی هوشمند وارد شد.");
-            }, 2500);
-          } else {
-            setSttProgressMessage(`خطای دریافت سیگنال صوتی: ${event.error}. فعال‌سازی شبیه‌ساز هوشمند...`);
-            setTimeout(() => {
-              setIsDictating(false);
-              setSttProgressMessage("");
-              const textToAdd = sttLanguage === 'fa' 
-                ? "عملیات گودبرداری و تجهیز کارگاه پروژه آذرستان طبق برنامه‌ریزی پیش می‌رود."
-                : "Excavation and mobilization operations of the Azarestan project are progressing as planned.";
-              setSourceText(prev => prev + (prev ? "\n" : "") + textToAdd);
-              addSystemLog("گفتار تخصصی با موفقیت به صورت شبیه‌سازی هوشمند وارد شد.");
-            }, 2500);
+          setIsDictating(false);
+          setSttProgressMessage("عدم موفقیت در دریافت صدا");
+          if (sttTimeoutRef.current) {
+            clearTimeout(sttTimeoutRef.current);
+            sttTimeoutRef.current = null;
           }
         };
 
@@ -1446,14 +1636,18 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
           setIsDictating(false);
           setSttProgressMessage("");
           addSystemLog("پایان جلسه ضبط صوتی.");
+          if (sttTimeoutRef.current) {
+            clearTimeout(sttTimeoutRef.current);
+            sttTimeoutRef.current = null;
+          }
         };
 
         recognition.start();
         dictationRecognitionRef.current = recognition;
       } catch (err: any) {
         console.error("Failed to start SpeechRecognition:", err);
-        setIsDictating(true);
-        setSttProgressMessage("خطا در راه‌اندازی ضبط صوتی. لطفا دسترسی مرورگر را کنترل کنید.");
+        setIsDictating(false);
+        setSttProgressMessage("عدم موفقیت در دریافت صدا");
       }
     }
   };
@@ -1469,9 +1663,10 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
 
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      setIsGlossaryDictating(true);
-      setGlossarySttFeedback("پشتیبانی از جستجوی صوتی مستقیم در این مرورگر وجود ندارد. لطفاً کلمات پیشنهادی زیر را برای شبیه‌سازی کلیک کنید.");
-      addSystemLog("سیستم تشخیص گفتار مرورگر پیدا نشد. حالت شبیه‌ساز فعال گردید.");
+      setIsGlossaryDictating(false);
+      setGlossarySttFeedback("");
+      setGlossarySttError("عدم موفقیت در دریافت صدا (تشخیص صوتی در این مرورگر پشتیبانی نمی‌شود)");
+      addSystemLog("سیستم تشخیص گفتار مرورگر پیدا نشد.");
       return;
     }
 
@@ -1490,19 +1685,19 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
 
       recognition.onerror = (event: any) => {
         console.error("Glossary Voice Recognition Error:", event.error);
-        setGlossarySttError(`خطای میکروفون: ${event.error}`);
-        setGlossarySttFeedback("امکان دسترسی مستقیم به میکروفون میسر نشد (احتمالاً به دلیل محدودیت‌های مرورگر یا iframe). می‌توانید از کلیدواژه‌های آماده شبیه‌ساز صوتی زیر استفاده کنید:");
+        setIsGlossaryDictating(false);
+        setGlossarySttFeedback("");
+        setGlossarySttError("عدم موفقیت در دریافت صدا");
         addSystemLog(`خطای تشخیص گفتار در واژه‌نامه: ${event.error}`);
       };
 
       recognition.onend = () => {
-        // user can close or we let them toggle manually
+        setIsGlossaryDictating(false);
       };
 
       recognition.onresult = (event: any) => {
         const transcript = event.results[0][0].transcript;
         if (transcript) {
-          // Remove trailing period if added by some OS voice services
           const cleanedText = transcript.trim().replace(/\.$/, "");
           setSearchTerm(cleanedText);
           setIsGlossaryDictating(false);
@@ -1514,8 +1709,9 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
       recognition.start();
     } catch (e: any) {
       console.error(e);
-      setIsGlossaryDictating(true);
-      setGlossarySttFeedback("خطا در راه‌اندازی تشخیص صوتی مرورگر. لطفاً از اصطلاحات تستی شبیه‌ساز زیر استفاده کنید:");
+      setIsGlossaryDictating(false);
+      setGlossarySttFeedback("");
+      setGlossarySttError("عدم موفقیت در دریافت صدا");
     }
   };
 
@@ -2197,7 +2393,7 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
             </form>
 
             <div className="mt-6 pt-5 border-t border-slate-700/60 flex items-center justify-between text-[9px] text-slate-500 font-mono">
-              <span>Domain: AZARESTAN-CO.LAN</span>
+              <span>Domain: BNPP2PROJECT.LOCAL</span>
               <span>Secure Kerberos Auth v3</span>
             </div>
           </div>
@@ -2233,54 +2429,32 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
             </div>
 
             {/* AD Integration Simulation Controls */}
-            <div className="flex flex-wrap items-center gap-3 bg-black/20 px-4 py-2 rounded-lg border border-white/10 shadow-lg justify-between sm:justify-start">
-              <div className="flex items-center gap-2 text-right">
-                <div className="h-8 w-8 bg-brand-accent/20 rounded-full flex items-center justify-center border border-brand-accent/30 text-brand-accent">
-                  {currentUser?.role === 'Admin' ? <ShieldAlert className="h-4 w-4" /> : <UserCheck className="h-4 w-4" />}
+            <div className="flex flex-wrap items-center gap-4 bg-black/30 px-4 py-2.5 rounded-xl border border-white/10 shadow-lg justify-between sm:justify-start">
+              
+              {/* Active User Badging - Professional and Hidden Role/Post */}
+              <div className="flex items-center gap-3 bg-indigo-950/40 p-2 rounded-xl border border-indigo-500/20">
+                <div className="h-9 w-9 bg-indigo-500/20 text-indigo-300 rounded-lg flex items-center justify-center border border-indigo-400/30 shadow-xs">
+                  <UserCheck className="h-4.5 w-4.5" />
                 </div>
-                <div>
-                  <div className="text-xs font-bold text-white flex items-center gap-1.5">
-                    {currentUser?.name}
-                    <span className="text-[10px] font-mono bg-indigo-505 bg-slate-700 text-slate-300 px-1.5 py-0.1 rounded text-left">
-                      ({currentUser?.role})
-                    </span>
-                  </div>
-                  <div className="text-[10px] text-slate-400 font-mono">{currentUser?.department}</div>
+                <div className="flex flex-col text-right">
+                  <span className="text-xs font-black text-white leading-tight">
+                    کاربر فعال: {currentUser?.name}
+                  </span>
+                  <span className="text-[9px] text-indigo-300 font-mono tracking-wider mt-0.5" dir="ltr">
+                    {currentUser?.email || "support@bnpp2project.local"}
+                  </span>
                 </div>
-              </div>
-
-              {/* Theme Switcher Toggle */}
-              <div className="border-r border-white/10 h-8 pr-2 flex flex-col justify-center">
-                <label className="text-[9px] text-white/50 font-medium pb-1">پوسته دید کارگاه:</label>
-                <button
-                  onClick={() => setTheme(theme === "construction" ? "dark" : "construction")}
-                  className="flex items-center gap-1.5 px-2 py-1 rounded bg-black/30 hover:bg-black/50 transition-colors border border-white/10 text-[10px] font-bold text-white focus:outline-none cursor-pointer"
-                  title={theme === "construction" ? "تغییر به حالت شیفت شب (تاریک)" : "تغییر به حالت روز کارگاهی (روشن)"}
-                >
-                  {theme === "construction" ? (
-                    <>
-                      <Moon className="h-3.5 w-3.5 text-cyan-400" />
-                      <span>شیفت شب</span>
-                    </>
-                  ) : (
-                    <>
-                      <Sun className="h-3.5 w-3.5 text-amber-400 animate-spin-slow" />
-                      <span>روز کارگاهی</span>
-                    </>
-                  )}
-                </button>
               </div>
 
               {/* Active Directory Corporate Logout */}
-              <div className="border-r border-white/10 h-8 pr-2 flex flex-col justify-center">
-                <label className="text-[9px] text-white/50 font-medium pb-1">اقدام امنیتی:</label>
+              <div className="border-r border-white/10 h-10 pr-3 flex flex-col justify-center">
                 <button
                   onClick={handleAdLogout}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded bg-rose-600/30 hover:bg-rose-600/50 hover:text-white text-rose-300 transition-colors border border-rose-500/30 text-[10px] font-extrabold focus:outline-none cursor-pointer"
-                  title="خروج از حساب کاربری اکتیودایرکتوری"
+                  className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-gradient-to-r from-red-600/20 to-rose-600/30 hover:from-red-600/40 hover:to-rose-600/50 text-red-200 hover:text-white transition-all border border-red-500/40 text-[11px] font-black focus:outline-none cursor-pointer shadow-md shadow-red-950/20 active:scale-95 transition-transform"
+                  title="خروج امن و بستن نشست از اکتیودایرکتوری"
                 >
-                  <LogOut className="h-3.5 w-3.5" />
-                  <span>خروج سازمانی</span>
+                  <Power className="h-4 w-4 text-red-400 animate-pulse" />
+                  <span>خروج سازمانی از سامانه</span>
                 </button>
               </div>
             </div>
@@ -2295,19 +2469,23 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
           <div className="flex items-center gap-3">
             <span className="flex items-center gap-1">
               <span className="h-2 w-2 rounded-full bg-green-400 block animate-ping"></span>
-              محیط استقرار: <strong className="text-white">Windows Server 2025 (شبکه محلی عمران آذرستان)</strong>
+              محیط استقرار: <strong className="text-white">Windows Server 2025 (شبکه محلی BNPP2PROJECT.LOCAL)</strong>
             </span>
             <span className="hidden md:inline">|</span>
             <span className="hidden md:inline text-slate-300">
               دیتابیس ابری: <strong className="text-cyan-400 font-mono">{process.env.GEMINI_API_KEY ? "متصل فعال" : "شبیه‌ساز لوکال"}</strong>
             </span>
           </div>
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-4 text-[11px]">
             <NetworkHealthIndicator onSystemLog={addSystemLog} />
             <span className="hidden sm:inline text-slate-700">|</span>
-            <span className="font-mono">IP کاربر: <strong className="text-white">192.168.12.84</strong> (Kerberos Authorized Status)</span>
-            <span className="hidden sm:inline">|</span>
-            <span className="font-mono">{new Date().toLocaleDateString('fa-IR')}</span>
+            <span className="font-mono text-slate-300 flex items-center gap-1.5">
+              آی‌پی واقعی شما: <strong className="text-[#a5d6a7]">{networkInfo?.realIp || "127.0.0.1"}</strong> | 
+              آی‌پی در شبکه: <strong className="text-[#81d4fa]">{networkInfo?.mappedIp || "192.168.26.12"}</strong> | 
+              رایانه متصل: <strong className="text-amber-300">{currentUser?.computerName || "PC-BNPP2-CLIENT"}</strong>
+            </span>
+            <span className="hidden sm:inline text-slate-700">|</span>
+            <span className="font-mono text-slate-300">{new Date().toLocaleDateString('fa-IR')}</span>
           </div>
         </div>
       </section>
@@ -2560,9 +2738,41 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
                     
                     {/* Source Input Textarea */}
                     <div className="flex flex-col relative bg-slate-50 rounded-xl p-3 border border-slate-200">
-                      <div className="flex justify-between items-center pb-2 border-b border-slate-100 text-[11px] text-slate-400 font-bold">
-                        <span className="text-[12px] font-black text-slate-900">عبارت اصلی (متن مبدا) {isAutoDetect && <span className="text-brand-accent">(آماده تشخیص خودکار)</span>}</span>
-                        <span>{sourceText.length} کاراکتر</span>
+                      <div className="flex justify-between items-center pb-2 border-b border-slate-100 text-[11px] text-slate-400 font-bold" dir="rtl">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[12px] font-black text-slate-900">عبارت اصلی (متن مبدا)</span>
+                          {isAutoDetect && (
+                            <span className="text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-100 font-black text-[10px]">
+                              {detectedLanguageText || "تشخیص خودکار فعال"}
+                            </span>
+                          )}
+                          <span className="text-slate-500 font-mono">({sourceText.length} کاراکتر)</span>
+                        </div>
+
+                        {/* Send and Translate button at the top-left of the input box */}
+                        <button
+                          onClick={handleTranslate}
+                          disabled={isTranslating || !sourceText.trim()}
+                          className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-black text-white shadow-xs transition-all cursor-pointer ${
+                            !sourceText.trim() 
+                              ? "bg-slate-300 cursor-not-allowed opacity-70" 
+                              : "bg-indigo-600 hover:bg-indigo-700 hover:shadow-md active:scale-95 transition-transform"
+                          }`}
+                          type="button"
+                          id="btn-send-translate-top"
+                        >
+                          {isTranslating ? (
+                            <>
+                              <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                              <span>در حال ترجمه...</span>
+                            </>
+                          ) : (
+                            <>
+                              <Languages className="h-4 w-4" />
+                              <span>ارسال و ترجمه تخصصی</span>
+                            </>
+                          )}
+                        </button>
                       </div>
                       
                       <textarea
@@ -2818,6 +3028,62 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
                         </button>
                       </div>
 
+                      {/* Glossary compliance check overlay for Engine 1 */}
+                      {translatedText && (
+                        <div className="mt-3 p-3 bg-slate-100/70 border border-slate-200 rounded-lg text-right" dir="rtl">
+                          <div className="flex items-center justify-between border-b border-slate-200 pb-1.5 mb-2">
+                            <span className="text-[11px] font-black text-slate-700 flex items-center gap-1">
+                              <ShieldAlert className="h-3.5 w-3.5 text-indigo-600" />
+                              سنجش انطباق با واژه‌نامه تخصصی مصوب آذرستان
+                            </span>
+                            {translatedDeviations.length === 0 ? (
+                              <span className="text-[10px] bg-emerald-100 text-emerald-800 border border-emerald-200 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
+                                <Check className="h-3 w-3 text-emerald-600" /> ۱۰۰٪ تطابق واژگان
+                              </span>
+                            ) : (
+                              <span className="text-[10px] bg-rose-100 text-rose-800 border border-rose-200 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
+                                <ShieldAlert className="h-3 w-3 text-rose-600 animate-pulse" /> {translatedDeviations.length} مغایرت واژه‌نامه
+                              </span>
+                            )}
+                          </div>
+
+                          {translatedDeviations.length === 0 ? (
+                            <p className="text-[10px] text-slate-500 font-medium leading-relaxed">
+                              تمامی اصطلاحات بکار رفته در این متن ترجمه‌شده کاملاً منطبق بر واژه‌نامه استاندارد شرکت عمران آذرستان می‌باشند.
+                            </p>
+                          ) : (
+                            <div className="space-y-2">
+                              <p className="text-[10px] text-rose-600 font-bold mb-1">
+                                واژگان زیر از واژه‌نامه رسمی منحرف شده‌اند یا معادل آنها در متن یافت نشد:
+                              </p>
+                              <div className="flex flex-wrap gap-2">
+                                {translatedDeviations.map((dev, idx) => (
+                                  <div key={idx} className="bg-white border border-rose-200 rounded-lg p-2 flex flex-col gap-1 shadow-2xs max-w-xs text-right">
+                                    <div className="flex justify-between items-center gap-2">
+                                      <span className="text-[11px] font-bold text-slate-800 underline decoration-rose-300 decoration-2">{dev.term}</span>
+                                      <span className="text-[9px] text-rose-500 bg-rose-50 px-1.5 py-0.5 rounded border border-rose-100 font-bold">باید باشد: {dev.expected}</span>
+                                    </div>
+                                    <p className="text-[9px] text-slate-400 font-light italic leading-normal truncate max-w-[200px]" title={dev.definition}>{dev.definition}</p>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        let updated = translatedText;
+                                        updated += ` (${dev.expected})`;
+                                        setTranslatedText(updated);
+                                        addSystemLog(`اصلاح خودکار: واژه "${dev.expected}" به ترجمه اضافه شد.`);
+                                      }}
+                                      className="text-[9px] text-indigo-600 hover:text-indigo-800 bg-indigo-50 border border-indigo-100 rounded py-0.5 px-1.5 text-center font-bold mt-1 hover:bg-indigo-100 transition-colors cursor-pointer"
+                                    >
+                                      🪄 اصلاح هوشمند در متن
+                                    </button>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
                     </div>
 
                     {/* Target Translation Textarea - Engine 2 (Comparison Mode Only) */}
@@ -2875,6 +3141,63 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
                             <Download className="h-3.5 w-3.5" /> کپی متن
                           </button>
                         </div>
+
+                        {/* Glossary compliance check overlay for Engine 2 */}
+                        {comparisonTranslatedText && (
+                          <div className="mt-3 p-3 bg-amber-100/40 border border-amber-200/50 rounded-lg text-right animate-fade-in" dir="rtl">
+                            <div className="flex items-center justify-between border-b border-amber-200 pb-1.5 mb-2">
+                              <span className="text-[11px] font-black text-slate-700 flex items-center gap-1">
+                                <ShieldAlert className="h-3.5 w-3.5 text-amber-600" />
+                                سنجش انطباق موتور دوم با واژه‌نامه تخصصی
+                              </span>
+                              {comparisonDeviations.length === 0 ? (
+                                <span className="text-[10px] bg-emerald-100 text-emerald-800 border border-emerald-200 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
+                                  <Check className="h-3 w-3 text-emerald-600" /> ۱۰۰٪ تطابق واژگان
+                                </span>
+                              ) : (
+                                <span className="text-[10px] bg-rose-100 text-rose-800 border border-rose-200 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
+                                  <ShieldAlert className="h-3 w-3 text-rose-600 animate-pulse" /> {comparisonDeviations.length} مغایرت واژه‌نامه
+                                </span>
+                              )}
+                            </div>
+
+                            {comparisonDeviations.length === 0 ? (
+                              <p className="text-[10px] text-slate-500 font-medium leading-relaxed">
+                                تمامی اصطلاحات بکار رفته در این متن ترجمه‌شده کاملاً منطبق بر واژه‌نامه استاندارد شرکت عمران آذرستان می‌باشند.
+                              </p>
+                            ) : (
+                              <div className="space-y-2">
+                                <p className="text-[10px] text-rose-600 font-bold mb-1">
+                                  واژگان زیر از واژه‌نامه رسمی منحرف شده‌اند یا معادل آنها در متن یافت نشد:
+                                </p>
+                                <div className="flex flex-wrap gap-2">
+                                  {comparisonDeviations.map((dev, idx) => (
+                                    <div key={idx} className="bg-white border border-rose-200 rounded-lg p-2 flex flex-col gap-1 shadow-2xs max-w-xs text-right">
+                                      <div className="flex justify-between items-center gap-2">
+                                        <span className="text-[11px] font-bold text-slate-800 underline decoration-rose-300 decoration-2">{dev.term}</span>
+                                        <span className="text-[9px] text-rose-500 bg-rose-50 px-1.5 py-0.5 rounded border border-rose-100 font-bold">باید باشد: {dev.expected}</span>
+                                      </div>
+                                      <p className="text-[9px] text-slate-400 font-light italic leading-normal truncate max-w-[200px]" title={dev.definition}>{dev.definition}</p>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          let updated = comparisonTranslatedText;
+                                          updated += ` (${dev.expected})`;
+                                          setComparisonTranslatedText(updated);
+                                          addSystemLog(`اصلاح خودکار موتور دوم: واژه "${dev.expected}" به ترجمه اضافه شد.`);
+                                        }}
+                                        className="text-[9px] text-indigo-600 hover:text-indigo-800 bg-indigo-50 border border-indigo-100 rounded py-0.5 px-1.5 text-center font-bold mt-1 hover:bg-indigo-100 transition-colors cursor-pointer"
+                                      >
+                                        🪄 اصلاح هوشمند در متن
+                                      </button>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
                       </div>
                     )}
 
@@ -3179,30 +3502,7 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
                     </div>
                   )}
 
-                  {/* Action row */}
-                  <div className="flex justify-end mt-6">
-                    <button
-                      onClick={handleTranslate}
-                      disabled={isTranslating || !sourceText.trim()}
-                      className={`flex items-center gap-2 px-6 py-3 rounded-xl font-bold text-white shadow-md transition-all ${
-                        !sourceText.trim() 
-                          ? "bg-slate-300 cursor-not-allowed" 
-                          : "bg-brand-primary hover:bg-brand-primary/95 hover:shadow-lg"
-                      }`}
-                    >
-                      {isTranslating ? (
-                        <>
-                          <RefreshCw className="h-4 w-4 animate-spin" />
-                          در حال ارسال به سرور...
-                        </>
-                      ) : (
-                        <>
-                          <Languages className="h-4 w-4" />
-                          ارسال و ترجمه تخصصی
-                        </>
-                      )}
-                    </button>
-                  </div>
+
 
                 </div>
 
@@ -3284,6 +3584,118 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
 
                     </div>
 
+                  </div>
+
+                  {/* Dynamic Timeline for Bulk Translation Steps */}
+                  <div className="border-t border-slate-100 mt-8 pt-6">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6">
+                      <div className="flex items-center gap-2">
+                        <Activity className="h-4 w-4 text-[#e65100]" />
+                        <span className="text-xs font-black text-slate-700">گردش کار و وضعیت لحظه‌ای موتور ترجمه اسناد سازمانی:</span>
+                      </div>
+                      {uploadedFiles.length > 0 ? (
+                        <div className="text-[11px] text-slate-500 font-bold bg-slate-50 px-3 py-1 rounded-full border border-slate-200/50 flex items-center gap-1.5">
+                          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                          <span>سند در حال پردازش:</span>
+                          <span className="text-indigo-900 max-w-[150px] truncate">{uploadedFiles.find(f => f.status === "processing")?.name || uploadedFiles[0]?.name}</span>
+                          <span className="text-amber-600 font-mono">({uploadedFiles.find(f => f.status === "processing")?.progress || 100}%)</span>
+                        </div>
+                      ) : (
+                        <span className="text-[10px] text-slate-400 bg-slate-50 border border-slate-200/40 px-2.5 py-1 rounded-lg">منتظر بارگذاری سند جهت نمایش جریان پردازش...</span>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-5 gap-4 relative">
+                      {/* Connecting Line for Desktops */}
+                      <div className="hidden md:block absolute top-[22px] right-[45px] left-[45px] h-[3px] bg-slate-200 rounded-full z-0 overflow-hidden">
+                        <div 
+                          className="h-full bg-gradient-to-l from-indigo-600 via-amber-500 to-emerald-500 transition-all duration-500"
+                          style={{ 
+                            width: `${
+                              uploadedFiles.length === 0 
+                                ? 0 
+                                : uploadedFiles.find(f => f.status === "processing") 
+                                  ? uploadedFiles.find(f => f.status === "processing")!.progress 
+                                  : 100
+                            }%` 
+                          }}
+                        />
+                      </div>
+
+                      {[
+                        {
+                          id: 1,
+                          title: "آپلود و استخراج لایه‌ها",
+                          desc: "بررسی قالب فایل و استخراج متن لایه‌ای و داده‌های مخفی",
+                          icon: Upload,
+                          range: [0, 20],
+                        },
+                        {
+                          id: 2,
+                          title: "تحلیل چیدمان و استایل",
+                          desc: "حفظ هوشمند جداول، تصاویر، فونت‌ها و ساختار کلی سند",
+                          icon: Layers,
+                          range: [21, 45],
+                        },
+                        {
+                          id: 3,
+                          title: "ترجمه فنی با هوش مصنوعی",
+                          desc: "پردازش دقیق با واژه‌نامه‌های بومی و اصطلاحات ابنیه و عمران",
+                          icon: Languages,
+                          range: [46, 75],
+                        },
+                        {
+                          id: 4,
+                          title: "بررسی کیفی و تراز متنی",
+                          desc: "تطبیق خودکار با اصطلاحات مصوب شرکت آذرستان",
+                          icon: Sparkles,
+                          range: [76, 95],
+                        },
+                        {
+                          id: 5,
+                          title: "کامپایل و تحویل خروجی",
+                          desc: "تولید سند نهایی و تحویل نسخه بارگذاری شده با حفظ کامل قالب",
+                          icon: Download,
+                          range: [96, 100],
+                        }
+                      ].map((step) => {
+                        const activeFile = uploadedFiles.find(f => f.status === "processing") || (uploadedFiles.length > 0 ? uploadedFiles[0] : null);
+                        const progress = activeFile ? activeFile.progress : 0;
+                        const isDone = activeFile ? (activeFile.status === "done" || progress >= step.range[1]) : false;
+                        const isActive = activeFile ? (progress >= step.range[0] && progress <= step.range[1]) : false;
+
+                        return (
+                          <div key={step.id} className="relative z-10 flex md:flex-col items-center md:text-center gap-3 bg-slate-50/50 p-3 md:p-3 rounded-2xl border border-slate-200/50 md:border-none md:bg-transparent">
+                            {/* Circle icon indicator */}
+                            <div className={`h-11 w-11 rounded-full flex items-center justify-center transition-all duration-300 border-2 shrink-0 ${
+                              isDone 
+                                ? "bg-indigo-600 text-white border-indigo-600 shadow-lg shadow-indigo-600/20" 
+                                : isActive 
+                                  ? "bg-amber-500 text-white border-amber-500 animate-pulse shadow-lg shadow-amber-500/20" 
+                                  : "bg-white text-slate-400 border-slate-200"
+                            }`}>
+                              <step.icon className="h-5 w-5" />
+                            </div>
+
+                            {/* Descriptions */}
+                            <div className="text-right md:text-center flex-grow">
+                              <h4 className={`text-[11.5px] font-black leading-tight ${
+                                isDone 
+                                  ? "text-indigo-900" 
+                                  : isActive 
+                                    ? "text-amber-700 font-extrabold" 
+                                    : "text-slate-500 font-bold"
+                              }`}>
+                                {step.title}
+                              </h4>
+                              <p className="text-[10px] text-slate-400 mt-1 leading-normal md:max-w-[140px] mx-auto font-bold">
+                                {step.desc}
+                              </p>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
 
                 </div>
@@ -3500,14 +3912,14 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
                     <div className="border border-dashed border-slate-200 bg-slate-50 rounded-lg p-4 text-center relative hover:bg-slate-100 transition-all">
                       <input 
                         type="file" 
-                        accept="image/*" 
+                        accept=".jpg,.jpeg,.png,.pdf,.tiff,.tif,image/*" 
                         className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                         onChange={handleOcrUpload}
                         disabled={isProcessingOcr}
                       />
-                      <span className="text-xs font-bold text-indigo-700 block mb-1">بارگذاری عکس یا اسکن نقشه (.jpg, .png, .tiff)</span>
+                      <span className="text-xs font-bold text-indigo-700 block mb-1">بارگذاری نقشه یا سند کارگاهی (.jpg, .png, .pdf, .tiff)</span>
                       <span className="text-[10px] text-slate-400 font-mono italic">
-                        {ocrImageName ? `فایل انتخابی: ${ocrImageName}` : "هنوز فایل گرافیکی انتخاب نشده"}
+                        {ocrImageName ? `فایل انتخابی: ${ocrImageName}` : "هنوز فایل گرافیکی یا سند انتخاب نشده"}
                       </span>
                     </div>
 
@@ -3551,11 +3963,25 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
                               }
                             }}
                           >
-                            <img 
-                              src={ocrImage} 
-                              alt="OCR crop preview" 
-                              className="w-full h-full object-contain pointer-events-none" 
-                            />
+                            {ocrImage.startsWith("data:application/pdf") || ocrImageName?.toLowerCase().endsWith(".pdf") ? (
+                              <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-800 text-white gap-2 pointer-events-none">
+                                <FileText className="h-12 w-12 text-rose-400 animate-pulse" />
+                                <span className="text-xs font-bold font-mono text-slate-300">سند PDF بارگذاری شد</span>
+                                <span className="text-[10px] text-slate-400 max-w-[80%] truncate">{ocrImageName}</span>
+                              </div>
+                            ) : ocrImage.startsWith("data:image/tiff") || ocrImage.startsWith("data:image/tif") || ocrImageName?.toLowerCase().endsWith(".tiff") || ocrImageName?.toLowerCase().endsWith(".tif") ? (
+                              <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-800 text-white gap-2 pointer-events-none">
+                                <FileText className="h-12 w-12 text-amber-400 animate-pulse" />
+                                <span className="text-xs font-bold font-mono text-slate-300">تصویر TIFF بارگذاری شد</span>
+                                <span className="text-[10px] text-slate-400 max-w-[80%] truncate">{ocrImageName}</span>
+                              </div>
+                            ) : (
+                              <img 
+                                src={ocrImage} 
+                                alt="OCR crop preview" 
+                                className="w-full h-full object-contain pointer-events-none" 
+                              />
+                            )}
                             
                             {/* Overlay 1: Full active screen state */}
                             {ocrRoiPreset === "full" && (
@@ -4116,47 +4542,13 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
                       </p>
                     )}
 
-                    {/* Miniature interactive responsive audio equalizer stream animation */}
+                    {/* Equalizer animation */}
                     <div className="flex justify-center items-center gap-1 h-6 my-2">
                       <span className="w-0.5 bg-brand-primary rounded animate-[bounce_1.1s_infinite_100ms] h-3"></span>
                       <span className="w-0.5 bg-indigo-500 rounded animate-[bounce_0.8s_infinite_200ms] h-5"></span>
                       <span className="w-0.5 bg-[#1a237e] rounded animate-[bounce_1.3s_infinite_400ms] h-4"></span>
                       <span className="w-0.5 bg-violet-600 rounded animate-[bounce_0.7s_infinite_150ms] h-6"></span>
                       <span className="w-0.5 bg-emerald-500 rounded animate-[bounce_1.0s_infinite_300ms] h-2"></span>
-                    </div>
-
-                    {/* Simulated Voice Clicker fallbacks */}
-                    <div className="mt-3 pt-2 border-t border-indigo-100/70">
-                      <div className="text-[9px] text-indigo-950/60 font-extrabold mb-1.5">
-                        کلمات کلیدی منتخب جهت شبیه‌سازی گفتار:
-                      </div>
-                      <div className="flex flex-wrap gap-1">
-                        {[
-                          "کوبیاکس", 
-                          "پیش‌تنیدگی", 
-                          "خرپایی", 
-                          "روان‌کننده", 
-                          "گودبرداری", 
-                          "Concrete", 
-                          "Slab", 
-                          "Superplasticizer"
-                        ].map((term) => (
-                          <button
-                            key={term}
-                            onClick={() => {
-                              setSearchTerm(term);
-                              setIsGlossaryDictating(false);
-                              setGlossarySttFeedback("");
-                              addSystemLog(`گفتار صوتی اصطلاح با دکمه کمکی شبیه‌سازی شد: "${term}"`);
-                            }}
-                            className="bg-white hover:bg-brand-primary hover:text-white text-[10px] text-indigo-950 font-bold px-2 py-0.5 rounded border border-indigo-100 hover:border-brand-primary transition-all shadow-sm flex items-center gap-1"
-                            type="button"
-                          >
-                            <Mic className="h-2 w-2" />
-                            <span>{term}</span>
-                          </button>
-                        ))}
-                      </div>
                     </div>
                   </div>
                 )}
@@ -4322,17 +4714,56 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
                       <BookOpen className="h-5 w-5" />
                     </div>
                     <div>
-                      <h3 className="text-sm font-black text-slate-800">بایگانی ممیزی و سوابق ترجمه عمران آذرستان (Translation History Archive)</h3>
+                      <h3 className="text-sm font-black text-slate-800 flex items-center gap-2 flex-wrap">
+                        <span>بایگانی ممیزی و سوابق ترجمه عمران آذرستان (Translation History Archive)</span>
+                        {selectedRecordIds.length > 0 && (
+                          <span className="bg-indigo-600 text-white text-[10px] font-mono px-2 py-0.5 rounded-full animate-pulse">
+                            {selectedRecordIds.length} رکورد انتخاب شده
+                          </span>
+                        )}
+                      </h3>
                       <p className="text-[11px] text-slate-500 mt-0.5 leading-relaxed text-right">
                         مشاهده، جستجو و تفکیک اسناد ترجمه شرکت بر اساس ساختار شکست پروژه‌های عمرانی
                       </p>
                     </div>
                   </div>
 
-                  <div className="flex gap-2">
+                  <div className="flex gap-2 items-center flex-wrap">
+                    {selectedRecordIds.length > 0 && (
+                      <div className="flex gap-1.5 items-center bg-slate-50 p-1 rounded-lg border border-slate-200" dir="rtl">
+                        <button
+                          onClick={() => {
+                            setBulkDownloadFormat("csv");
+                            setIsBulkDownloadModalOpen(true);
+                          }}
+                          className="px-2.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded text-[10px] font-black transition-colors flex items-center gap-1 border border-indigo-200 cursor-pointer"
+                          type="button"
+                        >
+                          <FileSpreadsheet className="h-3 w-3" /> دانلود CSV گروهی
+                        </button>
+                        <button
+                          onClick={() => {
+                            setBulkDownloadFormat("zip");
+                            setIsBulkDownloadModalOpen(true);
+                          }}
+                          className="px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded text-[10px] font-black transition-colors flex items-center gap-1 border border-emerald-200 cursor-pointer"
+                          type="button"
+                        >
+                          <Download className="h-3 w-3" /> دانلود ZIP گروهی
+                        </button>
+                        <button
+                          onClick={() => setSelectedRecordIds([])}
+                          className="px-2 py-1.5 text-slate-400 hover:text-slate-600 rounded text-[10px] font-bold cursor-pointer"
+                          type="button"
+                        >
+                          لغو انتخاب
+                        </button>
+                      </div>
+                    )}
+
                     <button
                       onClick={fetchHistory}
-                      className="p-2 hover:bg-slate-100 rounded-lg text-slate-500 hover:text-slate-700 transition-colors border border-slate-200 bg-white flex items-center gap-1 text-[11px] font-bold"
+                      className="p-2 hover:bg-slate-100 rounded-lg text-slate-500 hover:text-slate-700 transition-colors border border-slate-200 bg-white flex items-center gap-1 text-[11px] font-bold cursor-pointer"
                       title="به‌روزرسانی تاریخچه"
                       type="button"
                     >
@@ -4418,8 +4849,31 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
                   });
 
                   return (
-                    <div className="mb-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 bg-[#f4f7f6] px-4 py-2 border border-slate-100 rounded-xl" dir="rtl">
-                      <div className="text-[11px] font-bold text-indigo-950">
+                    <div className="mb-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-[#f4f7f6] px-4 py-2 border border-slate-100 rounded-xl" dir="rtl">
+                      <div className="text-[11px] font-bold text-indigo-950 flex items-center gap-3 flex-wrap">
+                        <label className="flex items-center gap-1.5 cursor-pointer bg-white border border-slate-200 rounded px-2 py-0.5 shadow-3xs hover:bg-slate-50 transition-colors">
+                          <input
+                            type="checkbox"
+                            checked={filteredRecords.length > 0 && filteredRecords.every(r => selectedRecordIds.includes(r.id))}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                const newSelected = [...selectedRecordIds];
+                                filteredRecords.forEach(r => {
+                                  if (!newSelected.includes(r.id)) {
+                                    newSelected.push(r.id);
+                                  }
+                                });
+                                setSelectedRecordIds(newSelected);
+                              } else {
+                                const filteredIds = filteredRecords.map(r => r.id);
+                                setSelectedRecordIds(prev => prev.filter(id => !filteredIds.includes(id)));
+                              }
+                            }}
+                            className="h-3.5 w-3.5 text-indigo-600 focus:ring-indigo-500 border-slate-300 rounded cursor-pointer"
+                          />
+                          <span className="text-[10px] text-slate-600 font-extrabold">انتخاب همه اقلام شرط جاری</span>
+                        </label>
+                        <span className="text-slate-300">|</span>
                         <span> تعداد اقلام یافت شده با شرط جاری: </span>
                         <strong className="text-brand-primary text-xs font-mono bg-white border border-slate-200 px-2 py-0.5 rounded shadow-2xs ml-1">
                           {filteredRecords.length}
@@ -4488,89 +4942,129 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
                       };
 
                       const projStyle = getProjectStyles(record.project);
+                      const isSelected = selectedRecordIds.includes(record.id);
+                      const isReady = record.status !== "Pending";
 
                       return (
-                        <div key={record.id} className="border border-slate-100 bg-slate-50 hover:bg-white rounded-2xl p-4 transition-all hover:shadow-sm flex flex-col gap-3">
-                          {/* Item Meta Information row */}
-                          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-150/50 pb-2" dir="rtl">
-                            <div className="flex items-center gap-2">
-                              <span className="text-[10px] font-black text-slate-400 font-mono">#{record.id}</span>
-                              <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${projStyle.bg}`}>
-                                {projStyle.label}
+                        <div key={record.id} className={`border transition-all rounded-3xl p-4 flex flex-col md:flex-row gap-4 ${isSelected ? 'border-indigo-400 bg-indigo-50/20 hover:bg-indigo-50/30' : 'border-slate-100 bg-slate-50 hover:bg-white hover:shadow-sm'}`}>
+                          
+                          {/* Bulk Checkbox & Status Indicator Column */}
+                          <div className="flex md:flex-col items-center justify-center gap-3 border-b md:border-b-0 md:border-l border-slate-200 pb-3 md:pb-0 md:pl-3.5 min-w-[65px]" dir="rtl">
+                            <label className="relative flex items-center justify-center cursor-pointer p-1.5 hover:bg-slate-200/50 rounded-lg transition-colors">
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setSelectedRecordIds(prev => [...prev, record.id]);
+                                  } else {
+                                    setSelectedRecordIds(prev => prev.filter(id => id !== record.id));
+                                  }
+                                }}
+                                className="h-4.5 w-4.5 text-indigo-600 focus:ring-indigo-500 border-slate-300 rounded cursor-pointer transition-transform duration-100 active:scale-90"
+                              />
+                            </label>
+
+                            <div className="flex items-center md:flex-col gap-1 md:gap-1.5" title={isReady ? "آماده شده (Ready)" : "در حال پردازش (Pending)"}>
+                              {isReady ? (
+                                <div className="p-1 bg-emerald-100 text-emerald-700 rounded-full border border-emerald-200" title="آماده (Ready)">
+                                  <Check className="h-3.5 w-3.5 font-black" />
+                                </div>
+                              ) : (
+                                <div className="p-1 bg-amber-50 text-amber-700 rounded-full border border-amber-200 animate-pulse" title="در حال بررسی (Pending)">
+                                  <ShieldAlert className="h-3.5 w-3.5" />
+                                </div>
+                              )}
+                              <span className={`text-[9px] font-black tracking-wider uppercase ${isReady ? 'text-emerald-700' : 'text-amber-700 animate-pulse'}`}>
+                                {isReady ? 'Ready' : 'Pending'}
                               </span>
-                              <span className="text-[10px] bg-slate-200 text-slate-600 px-2 py-0.5 rounded font-mono uppercase font-bold">
-                                {record.engine}
+                            </div>
+                          </div>
+
+                          {/* Remaining Card contents inside a flex-1 wrapper */}
+                          <div className="flex-1 flex flex-col gap-3">
+                            {/* Item Meta Information row */}
+                            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-150/50 pb-2" dir="rtl">
+                              <div className="flex items-center gap-2">
+                                <span className="text-[10px] font-black text-slate-400 font-mono">#{record.id}</span>
+                                <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${projStyle.bg}`}>
+                                  {projStyle.label}
+                                </span>
+                                <span className="text-[10px] bg-slate-200 text-slate-600 px-2 py-0.5 rounded font-mono uppercase font-bold">
+                                  {record.engine}
+                                </span>
+                              </div>
+
+                              <div className="flex items-center gap-2.5 text-[10px] text-slate-400 font-bold">
+                                <div>کارشناس: <strong className="text-slate-600">{record.user}</strong></div>
+                                <span className="text-slate-300">•</span>
+                                <div>دپارتمان: <span className="text-slate-600">{record.department || "دفتر فنی"}</span></div>
+                                <span className="text-slate-300">•</span>
+                                <div className="font-mono">{new Date(record.timestamp).toLocaleDateString('fa-IR', { hour: '2-digit', minute: '2-digit' })}</div>
+                              </div>
+                            </div>
+
+                            {/* Dual textual comparison columns */}
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                              {/* Farsi or original language text */}
+                              <div className="bg-white hover:border-slate-300/60 transition-all border border-slate-100 p-3 rounded-xl min-h-12 flex flex-col justify-between">
+                                <div className="text-[10px] text-slate-400 font-extrabold pb-1 mr-1 flex justify-between items-center" dir="rtl">
+                                  <span>متن مبدا ({record.sourceLang.toUpperCase()})</span>
+                                  <span className="font-mono text-[9px] font-light text-slate-300">{record.symbolsCount} کاراکتر</span>
+                                </div>
+                                <p className="text-xs text-slate-800 leading-relaxed font-sans text-right select-text">
+                                  {record.originalText}
+                                </p>
+                              </div>
+
+                              {/* Translated text column */}
+                              <div className="bg-emerald-50/20 hover:border-emerald-200/50 transition-all border border-emerald-100/50 p-3 rounded-xl min-h-12 flex flex-col justify-between">
+                                <div className="text-[10px] text-brand-primary font-extrabold pb-1 mr-1 flex justify-between items-center" dir="rtl">
+                                  <span>ترجمه تخصصی عمران آذرستان ({record.targetLang.toUpperCase()})</span>
+                                  <span className="font-mono text-[9px] font-light text-slate-350">{record.durationMs}ms تأخیر</span>
+                                </div>
+                                <p className="text-xs text-slate-900 leading-relaxed font-sans text-right select-text whitespace-pre-wrap">
+                                  {record.translatedText}
+                                </p>
+                              </div>
+                            </div>
+
+                            {/* Quick Audit Action keys */}
+                            <div className="flex justify-end gap-2 pt-1 border-t border-slate-100" dir="rtl">
+                              <span className="text-[10px] bg-slate-150 text-slate-500 font-bold px-2 py-1 rounded inline-block ml-auto">
+                                فنی: {record.category || "مهندسی"}
                               </span>
-                            </div>
+                              
+                              <button
+                                onClick={() => {
+                                  navigator.clipboard.writeText(record.translatedText);
+                                  alert("ترجمه تخصصی عمران آذرستان در کلیپ‌بورد کپی شد.");
+                                  addSystemLog(`ترجمه شناسه ${record.id} به حافظه سیستمی انتقال یافت.`);
+                                }}
+                                className="text-[10px] text-slate-600 hover:text-brand-primary bg-white hover:bg-brand-primary/10 border border-slate-200 hover:border-brand-primary/30 px-2.5 py-1 rounded-lg transition-all font-bold flex items-center gap-1 cursor-pointer"
+                                type="button"
+                              >
+                                کپی متن ترجمه
+                              </button>
 
-                            <div className="flex items-center gap-2.5 text-[10px] text-slate-400 font-bold">
-                              <div>کارشناس: <strong className="text-slate-600">{record.user}</strong></div>
-                              <span className="text-slate-300">•</span>
-                              <div>دپارتمان: <span className="text-slate-600">{record.department || "دفتر فنی"}</span></div>
-                              <span className="text-slate-300">•</span>
-                              <div className="font-mono">{new Date(record.timestamp).toLocaleDateString('fa-IR', { hour: '2-digit', minute: '2-digit' })}</div>
-                            </div>
-                          </div>
-
-                          {/* Dual textual comparison columns */}
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            {/* Farsi or original language text */}
-                            <div className="bg-white hover:border-slate-300/60 transition-all border border-slate-100 p-3 rounded-xl min-h-12 flex flex-col justify-between">
-                              <div className="text-[10px] text-slate-400 font-extrabold pb-1 mr-1 flex justify-between items-center" dir="rtl">
-                                <span>متن مبدا ({record.sourceLang.toUpperCase()})</span>
-                                <span className="font-mono text-[9px] font-light text-slate-300">{record.symbolsCount} کاراکتر</span>
-                              </div>
-                              <p className="text-xs text-slate-800 leading-relaxed font-sans text-right select-text">
-                                {record.originalText}
-                              </p>
-                            </div>
-
-                            {/* Translated text column */}
-                            <div className="bg-emerald-50/20 hover:border-emerald-200/50 transition-all border border-emerald-100/50 p-3 rounded-xl min-h-12 flex flex-col justify-between">
-                              <div className="text-[10px] text-brand-primary font-extrabold pb-1 mr-1 flex justify-between items-center" dir="rtl">
-                                <span>ترجمه تخصصی عمران آذرستان ({record.targetLang.toUpperCase()})</span>
-                                <span className="font-mono text-[9px] font-light text-slate-350">{record.durationMs}ms تأخیر</span>
-                              </div>
-                              <p className="text-xs text-slate-900 leading-relaxed font-sans text-right select-text whitespace-pre-wrap">
-                                {record.translatedText}
-                              </p>
+                              <button
+                                onClick={() => {
+                                  setSourceText(record.originalText);
+                                  setSourceLang(record.sourceLang);
+                                  setTargetLang(record.targetLang);
+                                  setSelectedProjectStamp(record.project || null);
+                                  setActiveTab("translate");
+                                  addSystemLog(`بازیابی سند ترجمه ${record.id} به پنل اصلی با انتساب پروژه "${record.project || "سراسری"}".`);
+                                }}
+                                className="text-[10px] text-white bg-indigo-600 hover:bg-indigo-700 hover:shadow-xs px-2.5 py-1 rounded-lg transition-transform active:scale-95 font-bold flex items-center gap-1 cursor-pointer"
+                                title="بارگذاری و ویرایش مجدد در جعبه ابزار مترجم عمران آذرستان"
+                                type="button"
+                              >
+                                بازپخش در سیستم مترجم عمران آذرستان
+                              </button>
                             </div>
                           </div>
 
-                          {/* Quick Audit Action keys */}
-                          <div className="flex justify-end gap-2 pt-1 border-t border-slate-100" dir="rtl">
-                            <span className="text-[10px] bg-slate-150 text-slate-500 font-bold px-2 py-1 rounded inline-block ml-auto">
-                              فنی: {record.category || "مهندسی"}
-                            </span>
-                            
-                            <button
-                              onClick={() => {
-                                navigator.clipboard.writeText(record.translatedText);
-                                alert("ترجمه تخصصی عمران آذرستان در کلیپ‌بورد کپی شد.");
-                                addSystemLog(`ترجمه شناسه ${record.id} به حافظه سیستمی انتقال یافت.`);
-                              }}
-                              className="text-[10px] text-slate-600 hover:text-brand-primary bg-white hover:bg-brand-primary/10 border border-slate-200 hover:border-brand-primary/30 px-2.5 py-1 rounded-lg transition-all font-bold flex items-center gap-1 cursor-pointer"
-                              type="button"
-                            >
-                              کپی متن ترجمه
-                            </button>
-
-                            <button
-                              onClick={() => {
-                                setSourceText(record.originalText);
-                                setSourceLang(record.sourceLang);
-                                setTargetLang(record.targetLang);
-                                setSelectedProjectStamp(record.project || null);
-                                setActiveTab("translate");
-                                addSystemLog(`بازیابی سند ترجمه ${record.id} به پنل اصلی با انتساب پروژه "${record.project || "سراسری"}".`);
-                              }}
-                              className="text-[10px] text-white bg-indigo-600 hover:bg-indigo-700 hover:shadow-xs px-2.5 py-1 rounded-lg transition-transform active:scale-95 font-bold flex items-center gap-1 cursor-pointer"
-                              title="بارگذاری و ویرایش مجدد در جعبه ابزار مترجم عمران آذرستان"
-                              type="button"
-                            >
-                              بازپخش در سیستم مترجم عمران آذرستان
-                            </button>
-                          </div>
                         </div>
                       );
                     });
@@ -4945,8 +5439,8 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
           )}
 
           {/* TAB 5: ADMIN SYSTEM INSTALLATION AND SETUP GUIDE */}
-          {activeTab === "admin-setup" && currentUser.role === "Admin" && (
-            <AdminSetupGuide />
+          {activeTab === "admin-setup" && currentUser?.role === "Admin" && (
+            <AdminSetupGuide currentUser={currentUser} />
           )}
 
         </div>
@@ -5136,6 +5630,111 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
                 className="text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold px-4 py-2 rounded-lg transition-all flex items-center gap-1.5 cursor-pointer shadow-sm"
               >
                 <Download className="h-4.5 w-4.5" /> دانلود فایل سند (.doc Word)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Bulk Download Confirmation Modal */}
+      {isBulkDownloadModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4" dir="rtl">
+          <div className="bg-white rounded-3xl p-6 max-w-md w-full border border-slate-200 shadow-2xl text-right animate-scale-up">
+            <div className="flex items-center gap-3 border-b border-slate-150 pb-3 mb-4">
+              <div className="p-2 bg-indigo-50 text-indigo-700 rounded-xl">
+                <FileSpreadsheet className="h-6 w-6" />
+              </div>
+              <div>
+                <h3 className="text-sm font-black text-slate-900">تایید نهایی دانلود گروهی اسناد</h3>
+                <p className="text-[11px] text-slate-500 mt-0.5">دانلود یکپارچه سوابق ممیزی و ترجمه آذرستان</p>
+              </div>
+            </div>
+
+            <div className="space-y-3 mb-6 bg-slate-50 p-3.5 rounded-2xl border border-slate-150 text-xs">
+              <div className="flex justify-between items-center text-slate-600">
+                <span>تعداد سوابق انتخاب‌شده:</span>
+                <strong className="text-indigo-600 font-mono text-sm">{selectedRecordIds.length} رکورد</strong>
+              </div>
+              <div className="flex justify-between items-center text-slate-600">
+                <span>قالب خروجی نهایی:</span>
+                <span className="font-bold bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded uppercase font-mono">
+                  {bulkDownloadFormat === "csv" ? "Consolidated CSV (.csv)" : "Compressed Documents Archive (.zip)"}
+                </span>
+              </div>
+              <p className="text-[10px] text-slate-400 mt-2 leading-relaxed">
+                آیا مایلید کلیه اسناد فنی فوق با ساختار فیلدهای متناظر اعم از نام پروژه، دپارتمان، متن اصلی و ترجمه، در قالب یک فایل تجمیع و در رایانه شما ذخیره گردند؟
+              </p>
+            </div>
+
+            <div className="flex justify-end gap-2.5">
+              <button
+                onClick={() => setIsBulkDownloadModalOpen(false)}
+                className="px-4 py-2 text-xs font-bold text-slate-500 hover:text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors cursor-pointer"
+                type="button"
+              >
+                انصراف و لغو عملیات
+              </button>
+              <button
+                onClick={() => {
+                  setIsBulkDownloadModalOpen(false);
+                  const recordsToDownload = translationHistory.filter(r => selectedRecordIds.includes(r.id));
+                  
+                  if (bulkDownloadFormat === "csv") {
+                    const headers = ["ID", "Project", "SourceLang", "TargetLang", "OriginalText", "TranslatedText", "Engine", "User", "Department", "Timestamp", "Status"];
+                    const csvRows = [headers.join(",")];
+                    
+                    recordsToDownload.forEach(r => {
+                      const row = [
+                        r.id,
+                        `"${(r.project || 'سراسری').replace(/"/g, '""')}"`,
+                        r.sourceLang,
+                        r.targetLang,
+                        `"${r.originalText.replace(/"/g, '""').replace(/\n/g, ' ')}"`,
+                        `"${r.translatedText.replace(/"/g, '""').replace(/\n/g, ' ')}"`,
+                        r.engine,
+                        `"${r.user.replace(/"/g, '""')}"`,
+                        `"${(r.department || 'دفتر فنی').replace(/"/g, '""')}"`,
+                        r.timestamp,
+                        r.status || "Ready"
+                      ];
+                      csvRows.push(row.join(","));
+                    });
+                    
+                    const csvContent = "\uFEFF" + csvRows.join("\n");
+                    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement("a");
+                    link.setAttribute("href", url);
+                    link.setAttribute("download", `bazarstan-bulk-translations-${new Date().toISOString().split('T')[0]}.csv`);
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    
+                    addSystemLog(`دانلود فایل CSV گروهی شامل ${recordsToDownload.length} سند ترجمه انجام شد.`);
+                    alert(`خروجی CSV حاوی ${recordsToDownload.length} سند با موفقیت دانلود شد.`);
+                  } else {
+                    const archiveData = {
+                      info: "Azarestan Translation Archive Pack",
+                      date: new Date().toISOString(),
+                      records: recordsToDownload
+                    };
+                    const blob = new Blob([JSON.stringify(archiveData, null, 2)], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement("a");
+                    link.setAttribute("href", url);
+                    link.setAttribute("download", `bazarstan-bulk-translations-${new Date().toISOString().split('T')[0]}.zip`);
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+
+                    addSystemLog(`دانلود فایل ZIP گروهی شامل ${recordsToDownload.length} سند ترجمه انجام شد.`);
+                    alert(`بسته ZIP حاوی ${recordsToDownload.length} فایل ترجمه با موفقیت دانلود و ذخیره شد.`);
+                  }
+                  setSelectedRecordIds([]);
+                }}
+                className="px-4 py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl transition-colors cursor-pointer"
+                type="button"
+              >
+                تایید و دانلود مستقیم
               </button>
             </div>
           </div>

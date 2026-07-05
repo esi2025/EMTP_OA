@@ -4,6 +4,7 @@ dotenv.config();
 import express from "express";
 import path from "path";
 import fs from "fs";
+import os from "os";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import { 
@@ -73,44 +74,108 @@ const PORT = 3000;
 app.use(express.json({ limit: '10mb' }));
 
 // Initial Static / In-Memory Mock Database for Active Directory
-let adUsers: ADUser[] = [
-  {
-    username: "m.esmaeili.admin",
-    name: "مهدی اسماعیلی",
-    email: "m.esmaeili@omran-azarestan.com",
-    department: "مدیریت پروژه و مهندسی",
-    role: "Admin",
-    active: true,
-    lastActive: "2026-06-17T11:15:00"
-  },
-  {
-    username: "m.esmaeili.trans",
-    name: "مهدی اسماعیلی",
-    email: "m.esmaeili@omran-azarestan.com",
-    department: "مترجم ارشد و کنترل متون",
-    role: "Translator",
-    active: true,
-    lastActive: "2026-06-17T10:45:00"
-  },
-  {
-    username: "m.esmaeili.dept",
-    name: "مهدی اسماعیلی",
-    email: "m.esmaeili@omran-azarestan.com",
-    department: "دفتر فنی و سازه",
-    role: "DeptManager",
-    active: true,
-    lastActive: "2026-06-17T09:30:00"
-  },
-  {
-    username: "m.esmaeili.user",
-    name: "مهدی اسماعیلی",
-    email: "m.esmaeili@omran-azarestan.com",
-    department: "کارگاه عمران پرند",
-    role: "User",
-    active: true,
-    lastActive: "2026-06-17T11:20:00"
+const AD_USERS_DB_PATH = path.join(process.cwd(), "ad_users_db.json");
+
+const loadAdUsersDb = (): ADUser[] => {
+  try {
+    if (fs.existsSync(AD_USERS_DB_PATH)) {
+      const data = fs.readFileSync(AD_USERS_DB_PATH, "utf-8");
+      return JSON.parse(data);
+    }
+  } catch (err) {
+    console.error("Error loading AD users DB:", err);
   }
-];
+  
+  const initial: ADUser[] = [
+    {
+      username: "SUPPORT",
+      name: "پشتیبان سیستم (مدیریت شبکه)",
+      email: "support@bnpp2project.local",
+      department: "مدیریت فناوری اطلاعات",
+      role: "Admin",
+      active: true,
+      lastActive: new Date().toISOString(),
+      authorized: true,
+      allowedIp: "",
+      canTranslate: true,
+      canDefineTerms: true,
+      computerName: "PC-SUPPORT-BNPP"
+    },
+    {
+      username: "m.esmaeili.admin",
+      name: "مهدی اسماعیلی",
+      email: "m.esmaeili@omran-azarestan.com",
+      department: "مدیریت پروژه و مهندسی",
+      role: "Admin",
+      active: true,
+      lastActive: "2026-06-17T11:15:00",
+      authorized: true,
+      allowedIp: "",
+      canTranslate: true,
+      canDefineTerms: true,
+      computerName: "PC-ESMAEILI-ADM"
+    },
+    {
+      username: "m.esmaeili.trans",
+      name: "مهدی اسماعیلی",
+      email: "m.esmaeili@omran-azarestan.com",
+      department: "مترجم ارشد و کنترل متون",
+      role: "Translator",
+      active: true,
+      lastActive: "2026-06-17T10:45:00",
+      authorized: true,
+      allowedIp: "",
+      canTranslate: true,
+      canDefineTerms: true,
+      computerName: "PC-ESMAEILI-TRN"
+    },
+    {
+      username: "m.esmaeili.dept",
+      name: "مهدی اسماعیلی",
+      email: "m.esmaeili@omran-azarestan.com",
+      department: "دفتر فنی و سازه",
+      role: "DeptManager",
+      active: true,
+      lastActive: "2026-06-17T09:30:00",
+      authorized: true,
+      allowedIp: "",
+      canTranslate: true,
+      canDefineTerms: true,
+      computerName: "PC-ESMAEILI-MGR"
+    },
+    {
+      username: "m.esmaeili.user",
+      name: "مهدی اسماعیلی",
+      email: "m.esmaeili@omran-azarestan.com",
+      department: "کارگاه عمران پرند",
+      role: "User",
+      active: true,
+      lastActive: "2026-06-17T11:20:00",
+      authorized: true,
+      allowedIp: "",
+      canTranslate: true,
+      canDefineTerms: true,
+      computerName: "PC-ESMAEILI-USR"
+    }
+  ];
+
+  try {
+    fs.writeFileSync(AD_USERS_DB_PATH, JSON.stringify(initial, null, 2), "utf-8");
+  } catch (err) {
+    console.error("Error writing initial AD users:", err);
+  }
+  return initial;
+};
+
+let adUsers: ADUser[] = loadAdUsersDb();
+
+const saveAdUsersDb = (db: ADUser[]) => {
+  try {
+    fs.writeFileSync(AD_USERS_DB_PATH, JSON.stringify(db, null, 2), "utf-8");
+  } catch (err) {
+    console.error("Error saving AD users DB:", err);
+  }
+};
 
 // Initial Construction Glossary/Terminology Database
 let glossaryDb: GlossaryTerm[] = [
@@ -216,7 +281,8 @@ let translationRecords: TranslationRecord[] = [
     user: "مهدی اسماعیلی",
     symbolsCount: 71,
     durationMs: 820,
-    project: "برج مسکونی فرمانیه"
+    project: "برج مسکونی فرمانیه",
+    status: "Ready"
   },
   {
     id: "rec-2",
@@ -231,7 +297,8 @@ let translationRecords: TranslationRecord[] = [
     user: "مهدی اسماعیلی",
     symbolsCount: 96,
     durationMs: 1150,
-    project: "خط ۷ مترو تهران"
+    project: "خط ۷ مترو تهران",
+    status: "Pending"
   },
   {
     id: "rec-3",
@@ -246,7 +313,8 @@ let translationRecords: TranslationRecord[] = [
     user: "مهدی اسماعیلی",
     symbolsCount: 57,
     durationMs: 950,
-    project: "پروژه مگا مال تهران"
+    project: "پروژه مگا مال تهران",
+    status: "Ready"
   }
 ];
 
@@ -386,6 +454,140 @@ const saveSessionsDb = (db: SavedUserSession[]) => {
   }
 };
 
+// Helper to get client IP and map deterministically to BNPP2PROJECT.LOCAL subnet (192.168.26.0/24 - 192.168.27.0/24)
+function getClientNetworkInfo(req: any, username: string) {
+  let realIp = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || "127.0.0.1") as string;
+  if (realIp.includes(",")) {
+    realIp = realIp.split(",")[0].trim();
+  }
+  if (realIp === "::1" || realIp === "::ffff:127.0.0.1") {
+    realIp = "127.0.0.1";
+  }
+
+  // Deterministic mapping based on username hash
+  let hash = 0;
+  const normalizedUsername = (username || "SUPPORT").toUpperCase();
+  for (let i = 0; i < normalizedUsername.length; i++) {
+    hash = normalizedUsername.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  const subnet = Math.abs(hash) % 2 === 0 ? 26 : 27;
+  const host = (Math.abs(hash) % 254) + 1; // 1 to 254
+  const mappedIp = `192.168.${subnet}.${host}`;
+
+  // Match network IP range specified: 192.168.26.0/24 to 192.168.27.0/24
+  const isCorporateIp = /^192\.168\.(26|27)\.\d+$/.test(realIp);
+  if (!isCorporateIp) {
+    realIp = mappedIp;
+  }
+
+  return { realIp, mappedIp };
+}
+
+// API: Get client connection network info
+app.get("/api/network-info", (req, res) => {
+  const username = (req.query.username || "SUPPORT") as string;
+  const { realIp, mappedIp } = getClientNetworkInfo(req, username);
+  res.json({ success: true, realIp, mappedIp });
+});
+
+// API: List AD users (Admin access only)
+app.get("/api/admin/users", (req, res) => {
+  res.json({ success: true, users: adUsers });
+});
+
+// API: Update AD user settings (SUPPORT access only)
+app.post("/api/admin/users/update", (req, res) => {
+  const { username, name, email, department, authorized, allowedIp, canTranslate, canDefineTerms, role, requester } = req.body;
+  if (!username) {
+    return res.status(400).json({ error: "نام کاربری الزامی است" });
+  }
+
+  if (!requester || requester.toLowerCase() !== "support") {
+    return res.status(403).json({ error: "خطای امنیتی: فقط کاربر ارشد پشتیبانی (SUPPORT) مجاز به ویرایش اطلاعات کاربران است" });
+  }
+
+  const idx = adUsers.findIndex(u => u.username.toLowerCase() === username.toLowerCase());
+  if (idx !== -1) {
+    adUsers[idx] = {
+      ...adUsers[idx],
+      name: name !== undefined ? name.trim() : adUsers[idx].name,
+      email: email !== undefined ? email.trim() : adUsers[idx].email,
+      department: department !== undefined ? department.trim() : adUsers[idx].department,
+      authorized: authorized !== undefined ? authorized : adUsers[idx].authorized,
+      allowedIp: allowedIp !== undefined ? allowedIp : adUsers[idx].allowedIp,
+      canTranslate: canTranslate !== undefined ? canTranslate : adUsers[idx].canTranslate,
+      canDefineTerms: canDefineTerms !== undefined ? canDefineTerms : adUsers[idx].canDefineTerms,
+      role: role !== undefined ? role : adUsers[idx].role
+    };
+    saveAdUsersDb(adUsers);
+    res.json({ success: true, user: adUsers[idx] });
+  } else {
+    res.status(404).json({ error: "کاربر مورد نظر در شبکه سازمانی یافت نشد" });
+  }
+});
+
+// API: Create new AD user (SUPPORT access only)
+app.post("/api/admin/users/create", (req, res) => {
+  const { username, name, email, department, role, authorized, allowedIp, canTranslate, canDefineTerms, requester } = req.body;
+  
+  if (!requester || requester.toLowerCase() !== "support") {
+    return res.status(403).json({ error: "خطای امنیتی: فقط کاربر ارشد پشتیبانی (SUPPORT) مجاز به ایجاد کاربر جدید است" });
+  }
+  if (!username || !name) {
+    return res.status(400).json({ error: "نام کاربری و نام و نام خانوادگی الزامی است" });
+  }
+
+  const cleanUsername = username.trim().toLowerCase();
+  const exists = adUsers.some(u => u.username.toLowerCase() === cleanUsername);
+  if (exists) {
+    return res.status(400).json({ error: "کاربری با این نام کاربری از قبل در شبکه تعریف شده است" });
+  }
+
+  const newUser: ADUser = {
+    username: cleanUsername,
+    name: name.trim(),
+    email: email ? email.trim() : `${cleanUsername}@bnpp2project.local`,
+    department: department ? department.trim() : "دفتر فنی و مهندسی",
+    role: role || "User",
+    active: false,
+    lastActive: "",
+    authorized: authorized !== undefined ? authorized : true,
+    allowedIp: allowedIp || "",
+    canTranslate: canTranslate !== undefined ? canTranslate : true,
+    canDefineTerms: canDefineTerms !== undefined ? canDefineTerms : true,
+    computerName: `PC-${username.toUpperCase().replace(/[^A-Z0-9]/g, '-')}.BNPP2PROJECT.LOCAL`
+  };
+
+  adUsers.push(newUser);
+  saveAdUsersDb(adUsers);
+  res.json({ success: true, user: newUser });
+});
+
+// API: Delete AD user (SUPPORT access only)
+app.post("/api/admin/users/delete", (req, res) => {
+  const { username, requester } = req.body;
+  
+  if (!requester || requester.toLowerCase() !== "support") {
+    return res.status(403).json({ error: "خطای امنیتی: فقط کاربر ارشد پشتیبانی (SUPPORT) مجاز به حذف کاربر است" });
+  }
+  if (!username) {
+    return res.status(400).json({ error: "نام کاربری الزامی است" });
+  }
+
+  if (username.toLowerCase() === "support") {
+    return res.status(400).json({ error: "حذف حساب کاربری پشتیبان اصلی سیستم (SUPPORT) غیرمجاز است" });
+  }
+
+  const idx = adUsers.findIndex(u => u.username.toLowerCase() === username.toLowerCase());
+  if (idx !== -1) {
+    const deletedUser = adUsers.splice(idx, 1)[0];
+    saveAdUsersDb(adUsers);
+    res.json({ success: true, deletedUsername: username });
+  } else {
+    res.status(404).json({ error: "کاربر مورد نظر یافت نشد" });
+  }
+});
+
 // API: Authentic user check (Mock Microsoft Active Directory)
 app.post("/api/login", (req, res) => {
   const { username, password } = req.body;
@@ -396,23 +598,44 @@ app.post("/api/login", (req, res) => {
     return res.status(400).json({ error: "رمز عبور سازمانی الزامی است" });
   }
 
+  // Admin login strict password check
+  if (username.toUpperCase() === "SUPPORT" && password !== "Aa8796sS") {
+    return res.status(401).json({ error: "رمز عبور وارد شده برای اکانت پشتیبان نادرست است" });
+  }
+
+  // Get network IPs
+  const { realIp, mappedIp } = getClientNetworkInfo(req, username);
+
   // Look up username (case insensitive)
   let matchedUser = adUsers.find(u => u.username.toLowerCase() === username.toLowerCase());
   if (!matchedUser) {
-    // Dynamic mock fallback user creation
-    matchedUser = {
-      username: username.toLowerCase().replace(/\s+/g, '.'),
-      name: username,
-      email: `${username.toLowerCase().replace(/\s+/g, '.')}@omran-azarestan.com`,
-      department: "دفتر فنی و مهندسی",
-      role: "User",
-      active: true,
-      lastActive: new Date().toISOString()
-    };
-    adUsers.push(matchedUser);
+    return res.status(403).json({ 
+      error: "حساب کاربری شما در پایگاه داده شبکه یافت نشد. استفاده از این سامانه منحصراً برای کاربرانی است که از قبل توسط پشتیبان سیستم (SUPPORT) در فهرست مجاز تعریف شده‌اند." 
+    });
   } else {
     matchedUser.lastActive = new Date().toISOString();
+    saveAdUsersDb(adUsers);
   }
+
+  // Security 1: Is user authorized (active in network list)?
+  if (matchedUser.authorized === false) {
+    return res.status(403).json({ error: "دسترسی حساب کاربری شما توسط ادمین سیستم مسدود یا غیرمجاز اعلام شده است." });
+  }
+
+  // Security 2: IP Range Restriction Check
+  if (matchedUser.allowedIp && matchedUser.allowedIp.trim() !== "") {
+    const restriction = matchedUser.allowedIp.trim();
+    if (restriction !== realIp && restriction !== mappedIp) {
+      return res.status(403).json({ 
+        error: `دسترسی شما غیرمجاز است. این اکانت محدود به IP خاص (${restriction}) می‌باشد. IP فیزیکی شما: ${realIp} | IP سازمانی: ${mappedIp}` 
+      });
+    }
+  }
+
+  // Always fetch and update the computerName with the actual computer hostname in the Active Directory domain
+  const realHostname = os.hostname().toUpperCase();
+  matchedUser.computerName = `${realHostname}.BNPP2PROJECT.LOCAL`;
+  saveAdUsersDb(adUsers);
 
   // Create a session in user_sessions_db.json
   const sessions = loadSessionsDb();
@@ -438,6 +661,8 @@ app.post("/api/login", (req, res) => {
     success: true,
     user: matchedUser,
     sessionId: sessionId,
+    realIp,
+    mappedIp,
     token: `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.ad-${matchedUser.username}-${matchedUser.role}.simulated`
   });
 });
@@ -498,10 +723,19 @@ app.get("/api/glossary", (req, res) => {
 
 // API: Save dictionary word
 app.post("/api/glossary", (req, res) => {
-  const { term, equivalentEn, equivalentRu, definitionFa, definitionEn, definitionRu, tags, department, category, project, author } = req.body;
+  const { term, equivalentEn, equivalentRu, definitionFa, definitionEn, definitionRu, tags, department, category, project, author, username } = req.body;
   
   if (!term || !equivalentEn) {
     return res.status(400).json({ error: "اصطلاحات فارسی و معادل انگلیسی اجباری هستند" });
+  }
+
+  // Enforce dictionary definition permission
+  const finalUsername = username || author;
+  if (finalUsername) {
+    const userObj = adUsers.find(u => u.username.toLowerCase() === String(finalUsername).toLowerCase());
+    if (userObj && userObj.canDefineTerms === false) {
+      return res.status(403).json({ error: "شما دسترسی لازم برای تعریف یا ویرایش لغات جدید در واژه‌نامه تخصصی را ندارید." });
+    }
   }
 
   const newTerm: GlossaryTerm = {
@@ -529,6 +763,16 @@ app.post("/api/glossary", (req, res) => {
 // API: Delete dictionary word
 app.delete("/api/glossary/:id", (req, res) => {
   const { id } = req.params;
+  const username = req.query.username || req.body.username;
+
+  // Enforce dictionary definition permission
+  if (username) {
+    const userObj = adUsers.find(u => u.username.toLowerCase() === String(username).toLowerCase());
+    if (userObj && userObj.canDefineTerms === false) {
+      return res.status(403).json({ error: "شما دسترسی لازم برای تعریف یا ویرایش لغات جدید در واژه‌نامه تخصصی را ندارید." });
+    }
+  }
+
   glossaryDb = glossaryDb.filter(t => t.id !== id);
   res.json({ success: true });
 });
@@ -536,7 +780,7 @@ app.delete("/api/glossary/:id", (req, res) => {
 // API: Update dictionary word
 app.put("/api/glossary/:id", (req, res) => {
   const { id } = req.params;
-  const { term, equivalentEn, equivalentRu, definitionFa, definitionEn, definitionRu, tags, category, project } = req.body;
+  const { term, equivalentEn, equivalentRu, definitionFa, definitionEn, definitionRu, tags, category, project, username, author } = req.body;
   
   const index = glossaryDb.findIndex(t => t.id === id);
   if (index === -1) {
@@ -545,6 +789,15 @@ app.put("/api/glossary/:id", (req, res) => {
 
   if (!term || !equivalentEn) {
     return res.status(400).json({ error: "اصطلاحات فارسی و معادل انگلیسی اجباری هستند" });
+  }
+
+  // Enforce dictionary definition permission
+  const finalUsername = username || author;
+  if (finalUsername) {
+    const userObj = adUsers.find(u => u.username.toLowerCase() === String(finalUsername).toLowerCase());
+    if (userObj && userObj.canDefineTerms === false) {
+      return res.status(403).json({ error: "شما دسترسی لازم برای تعریف یا ویرایش لغات جدید در واژه‌نامه تخصصی را ندارید." });
+    }
   }
 
   glossaryDb[index] = {
@@ -908,6 +1161,14 @@ app.post("/api/translate", async (req, res) => {
     return res.status(400).json({ error: "متن جهت ترجمه ارسال نشده است" });
   }
 
+  // Security check: has translation permission?
+  if (username) {
+    const userObj = adUsers.find(u => u.username.toLowerCase() === username.toLowerCase());
+    if (userObj && userObj.canTranslate === false) {
+      return res.status(403).json({ error: "شما مجوز دسترسی به بخش ترجمه تخصصی را ندارید. لطفاً با مدیر شبکه تماس بگیرید." });
+    }
+  }
+
   // Auto-detect source language if specified as "auto" or requested with isAutoDetect
   let actualSourceLang = sourceLang;
   if (sourceLang === "auto") {
@@ -1070,7 +1331,8 @@ Provide ONLY the final translated text as the response. Do not add any introduct
     user: username || "کاربر مهمان",
     symbolsCount: text.length,
     durationMs,
-    project: recordProject
+    project: recordProject,
+    status: "Ready"
   };
 
   translationRecords.unshift(newRecord);
