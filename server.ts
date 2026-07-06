@@ -16,6 +16,20 @@ import {
   FileJob
 } from "./src/types";
 
+// Load custom saved API Key from file if exists on boot
+const API_KEY_FILE = path.join(process.cwd(), "gemini_key.json");
+try {
+  if (fs.existsSync(API_KEY_FILE)) {
+    const data = JSON.parse(fs.readFileSync(API_KEY_FILE, "utf-8"));
+    if (data && data.apiKey) {
+      process.env.GEMINI_API_KEY = data.apiKey;
+      console.log("Custom Gemini API key loaded on startup from gemini_key.json");
+    }
+  }
+} catch (err) {
+  console.error("Error reading saved API key on boot:", err);
+}
+
 // Lazy-initialize Gemini API
 let aiClient: GoogleGenAI | null = null;
 const getGeminiClient = (): GoogleGenAI | null => {
@@ -495,15 +509,17 @@ app.get("/api/admin/users", (req, res) => {
   res.json({ success: true, users: adUsers });
 });
 
-// API: Update AD user settings (SUPPORT access only)
+// API: Update AD user settings (SUPPORT / Admin access)
 app.post("/api/admin/users/update", (req, res) => {
-  const { username, name, email, department, authorized, allowedIp, canTranslate, canDefineTerms, role, requester } = req.body;
+  const { username, name, email, department, authorized, allowedIp, canTranslate, canDefineTerms, role, requester, password } = req.body;
   if (!username) {
     return res.status(400).json({ error: "نام کاربری الزامی است" });
   }
 
-  if (!requester || requester.toLowerCase() !== "support") {
-    return res.status(403).json({ error: "خطای امنیتی: فقط کاربر ارشد پشتیبانی (SUPPORT) مجاز به ویرایش اطلاعات کاربران است" });
+  const requesterUser = adUsers.find(u => u.username.toLowerCase() === requester?.toLowerCase());
+  const isAuthorized = requester?.toLowerCase() === "support" || (requesterUser && requesterUser.role === "Admin");
+  if (!isAuthorized) {
+    return res.status(403).json({ error: "خطای امنیتی: فقط کاربر ارشد پشتیبانی (SUPPORT) یا مدیر سیستم مجاز به ویرایش اطلاعات کاربران است" });
   }
 
   const idx = adUsers.findIndex(u => u.username.toLowerCase() === username.toLowerCase());
@@ -517,7 +533,8 @@ app.post("/api/admin/users/update", (req, res) => {
       allowedIp: allowedIp !== undefined ? allowedIp : adUsers[idx].allowedIp,
       canTranslate: canTranslate !== undefined ? canTranslate : adUsers[idx].canTranslate,
       canDefineTerms: canDefineTerms !== undefined ? canDefineTerms : adUsers[idx].canDefineTerms,
-      role: role !== undefined ? role : adUsers[idx].role
+      role: role !== undefined ? role : adUsers[idx].role,
+      password: password !== undefined ? password : adUsers[idx].password
     };
     saveAdUsersDb(adUsers);
     res.json({ success: true, user: adUsers[idx] });
@@ -526,12 +543,14 @@ app.post("/api/admin/users/update", (req, res) => {
   }
 });
 
-// API: Create new AD user (SUPPORT access only)
+// API: Create new AD user (SUPPORT / Admin access)
 app.post("/api/admin/users/create", (req, res) => {
-  const { username, name, email, department, role, authorized, allowedIp, canTranslate, canDefineTerms, requester } = req.body;
+  const { username, name, email, department, role, authorized, allowedIp, canTranslate, canDefineTerms, requester, password } = req.body;
   
-  if (!requester || requester.toLowerCase() !== "support") {
-    return res.status(403).json({ error: "خطای امنیتی: فقط کاربر ارشد پشتیبانی (SUPPORT) مجاز به ایجاد کاربر جدید است" });
+  const requesterUser = adUsers.find(u => u.username.toLowerCase() === requester?.toLowerCase());
+  const isAuthorized = requester?.toLowerCase() === "support" || (requesterUser && requesterUser.role === "Admin");
+  if (!isAuthorized) {
+    return res.status(403).json({ error: "خطای امنیتی: فقط کاربر ارشد پشتیبانی (SUPPORT) یا مدیر سیستم مجاز به ایجاد کاربر جدید است" });
   }
   if (!username || !name) {
     return res.status(400).json({ error: "نام کاربری و نام و نام خانوادگی الزامی است" });
@@ -555,7 +574,8 @@ app.post("/api/admin/users/create", (req, res) => {
     allowedIp: allowedIp || "",
     canTranslate: canTranslate !== undefined ? canTranslate : true,
     canDefineTerms: canDefineTerms !== undefined ? canDefineTerms : true,
-    computerName: `PC-${username.toUpperCase().replace(/[^A-Z0-9]/g, '-')}.BNPP2PROJECT.LOCAL`
+    computerName: `PC-${username.toUpperCase().replace(/[^A-Z0-9]/g, '-')}.BNPP2PROJECT.LOCAL`,
+    password: password || ""
   };
 
   adUsers.push(newUser);
@@ -563,12 +583,14 @@ app.post("/api/admin/users/create", (req, res) => {
   res.json({ success: true, user: newUser });
 });
 
-// API: Delete AD user (SUPPORT access only)
+// API: Delete AD user (SUPPORT / Admin access)
 app.post("/api/admin/users/delete", (req, res) => {
   const { username, requester } = req.body;
   
-  if (!requester || requester.toLowerCase() !== "support") {
-    return res.status(403).json({ error: "خطای امنیتی: فقط کاربر ارشد پشتیبانی (SUPPORT) مجاز به حذف کاربر است" });
+  const requesterUser = adUsers.find(u => u.username.toLowerCase() === requester?.toLowerCase());
+  const isAuthorized = requester?.toLowerCase() === "support" || (requesterUser && requesterUser.role === "Admin");
+  if (!isAuthorized) {
+    return res.status(403).json({ error: "خطای امنیتی: فقط کاربر ارشد پشتیبانی (SUPPORT) یا مدیر سیستم مجاز به حذف کاربر است" });
   }
   if (!username) {
     return res.status(400).json({ error: "نام کاربری الزامی است" });
@@ -585,6 +607,53 @@ app.post("/api/admin/users/delete", (req, res) => {
     res.json({ success: true, deletedUsername: username });
   } else {
     res.status(404).json({ error: "کاربر مورد نظر یافت نشد" });
+  }
+});
+
+// API: Get Gemini API Key (SUPPORT / Admin only)
+app.get("/api/admin/apikey", (req, res) => {
+  const { requester } = req.query;
+  if (!requester) {
+    return res.status(400).json({ error: "کاربر درخواست‌کننده مشخص نیست" });
+  }
+  
+  const requesterUser = adUsers.find(u => u.username.toLowerCase() === (requester as string).toLowerCase());
+  const isAuthorized = (requester as string).toLowerCase() === "support" || (requesterUser && requesterUser.role === "Admin");
+  if (!isAuthorized) {
+    return res.status(403).json({ error: "خطای امنیتی: فقط کاربران ارشد مجاز به مشاهده کلید API هستند" });
+  }
+
+  res.json({ 
+    success: true, 
+    apiKey: process.env.GEMINI_API_KEY || "" 
+  });
+});
+
+// API: Set Gemini API Key (SUPPORT / Admin only)
+app.post("/api/admin/apikey", (req, res) => {
+  const { requester, apiKey } = req.body;
+  if (!requester) {
+    return res.status(400).json({ error: "کاربر درخواست‌کننده مشخص نیست" });
+  }
+  if (apiKey === undefined) {
+    return res.status(400).json({ error: "کلید API معتبر نمی‌باشد" });
+  }
+
+  const requesterUser = adUsers.find(u => u.username.toLowerCase() === requester.toLowerCase());
+  const isAuthorized = requester.toLowerCase() === "support" || (requesterUser && requesterUser.role === "Admin");
+  if (!isAuthorized) {
+    return res.status(403).json({ error: "خطای امنیتی: فقط کاربران ارشد مجاز به ویرایش کلید API هستند" });
+  }
+
+  // Save to file
+  try {
+    fs.writeFileSync(API_KEY_FILE, JSON.stringify({ apiKey: apiKey.trim() }, null, 2), "utf-8");
+    process.env.GEMINI_API_KEY = apiKey.trim();
+    // Force reinitialization of Gemini client on next call
+    aiClient = null;
+    res.json({ success: true, message: "کلید هوش مصنوعی با موفقیت بروزرسانی شد." });
+  } catch (err) {
+    res.status(500).json({ error: "خطا در ذخیره‌سازی فایل کلید روی سرور" });
   }
 });
 
@@ -612,10 +681,17 @@ app.post("/api/login", (req, res) => {
     return res.status(403).json({ 
       error: "حساب کاربری شما در پایگاه داده شبکه یافت نشد. استفاده از این سامانه منحصراً برای کاربرانی است که از قبل توسط پشتیبان سیستم (SUPPORT) در فهرست مجاز تعریف شده‌اند." 
     });
-  } else {
-    matchedUser.lastActive = new Date().toISOString();
-    saveAdUsersDb(adUsers);
   }
+
+  // Enforce password check if configured
+  if (matchedUser.password && matchedUser.password.trim() !== "") {
+    if (password !== matchedUser.password.trim()) {
+      return res.status(401).json({ error: "رمز عبور وارد شده برای این حساب کاربری نادرست است" });
+    }
+  }
+
+  matchedUser.lastActive = new Date().toISOString();
+  saveAdUsersDb(adUsers);
 
   // Security 1: Is user authorized (active in network list)?
   if (matchedUser.authorized === false) {

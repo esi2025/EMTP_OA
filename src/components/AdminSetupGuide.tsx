@@ -22,15 +22,20 @@ import {
   Activity,
   UserCheck,
   ShieldAlert,
-  LogOut
+  LogOut,
+  Eye,
+  EyeOff,
+  Save
 } from "lucide-react";
 
 import { ADUser } from "../types";
 
 export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
-  const [adminTab, setAdminTab] = useState<"users" | "dashboard" | "docs" >("users");
+  const [adminTab, setAdminTab] = useState<"users" | "dashboard" | "docs" | "apikey">("users");
   const [activeStep, setActiveStep] = useState<number>(1);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const canEditUsers = currentUser?.username?.toLowerCase() === "support" || currentUser?.role === "Admin";
 
   // Active Directory Users state
   const [adUsers, setAdUsers] = useState<any[]>([]);
@@ -46,7 +51,55 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
   const [newAllowedIp, setNewAllowedIp] = useState("");
   const [newCanTranslate, setNewCanTranslate] = useState(true);
   const [newCanDefineTerms, setNewCanDefineTerms] = useState(true);
+  const [newPassword, setNewPassword] = useState("");
   const [isCreatingUser, setIsCreatingUser] = useState(false);
+
+  // API Key Management States
+  const [apiKey, setApiKey] = useState("");
+  const [isFetchingApiKey, setIsFetchingApiKey] = useState(false);
+  const [isUpdatingApiKey, setIsUpdatingApiKey] = useState(false);
+  const [showApiKey, setShowApiKey] = useState(false);
+
+  const fetchApiKey = async () => {
+    setIsFetchingApiKey(true);
+    try {
+      const res = await fetch(`/api/admin/apikey?requester=${encodeURIComponent(currentUser?.username || "")}`);
+      const data = await res.json();
+      if (data.success) {
+        setApiKey(data.apiKey || "");
+      }
+    } catch (err) {
+      console.error("Error fetching API Key:", err);
+    } finally {
+      setIsFetchingApiKey(false);
+    }
+  };
+
+  const handleUpdateApiKey = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsUpdatingApiKey(true);
+    try {
+      const res = await fetch("/api/admin/apikey", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          requester: currentUser?.username,
+          apiKey: apiKey
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        alert("کلید هوش مصنوعی با موفقیت بروزرسانی شد.");
+      } else {
+        alert(data.error || "خطا در بروزرسانی کلید");
+      }
+    } catch (err) {
+      console.error(err);
+      alert("خطای ارتباط با سرور");
+    } finally {
+      setIsUpdatingApiKey(false);
+    }
+  };
 
   const fetchAdUsers = async () => {
     setIsLoadingUsers(true);
@@ -102,6 +155,7 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
           allowedIp: newAllowedIp,
           canTranslate: newCanTranslate,
           canDefineTerms: newCanDefineTerms,
+          password: newPassword,
           requester: currentUser?.username
         })
       });
@@ -117,6 +171,7 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
         setNewAllowedIp("");
         setNewCanTranslate(true);
         setNewCanDefineTerms(true);
+        setNewPassword("");
         setShowAddForm(false);
         alert(`کاربر سازمانی جدید (${data.user.name}) با موفقیت به شبکه اضافه شد.`);
       } else {
@@ -237,6 +292,12 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
 
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (adminTab === "apikey") {
+      fetchApiKey();
+    }
+  }, [adminTab]);
 
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -397,7 +458,7 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
             </p>
           </div>
         </div>
-        <div className="flex bg-slate-800 rounded-lg p-1 border border-slate-700 font-bold text-xs">
+        <div className="flex bg-slate-800 rounded-lg p-1 border border-slate-700 font-bold text-xs flex-wrap">
           <button
             onClick={() => setAdminTab("users")}
             className={`px-4 py-2 rounded-md transition-all cursor-pointer ${adminTab === "users" ? "bg-indigo-600 text-white" : "text-slate-400 hover:text-white"}`}
@@ -416,6 +477,12 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
           >
             مستندات استقرار سیستم
           </button>
+          <button
+            onClick={() => setAdminTab("apikey")}
+            className={`px-4 py-2 rounded-md transition-all cursor-pointer ${adminTab === "apikey" ? "bg-indigo-600 text-white" : "text-slate-400 hover:text-white"}`}
+          >
+            تنظیمات کلید هوش مصنوعی (API Key)
+          </button>
         </div>
       </div>
 
@@ -431,7 +498,7 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                {currentUser?.username?.toLowerCase() === "support" && (
+                {canEditUsers && (
                   <button
                     onClick={() => setShowAddForm(!showAddForm)}
                     className="text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold px-3 py-1.5 rounded-lg transition-all flex items-center gap-1 cursor-pointer shadow-sm"
@@ -450,9 +517,9 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
                 </button>
               </div>
             </div>
-
-            {/* Create New User Form (SUPPORT ONLY) */}
-            {currentUser?.username?.toLowerCase() === "support" && showAddForm && (
+ 
+            {/* Create New User Form (SUPPORT / Admin ONLY) */}
+            {canEditUsers && showAddForm && (
               <form onSubmit={handleCreateUser} className="bg-white border border-indigo-100 rounded-xl p-4 mb-5 text-right space-y-4 shadow-md animate-fade-in">
                 <div className="flex items-center gap-2 text-indigo-700 font-black text-xs pb-2 border-b border-indigo-50">
                   <Plus className="h-4 w-4 text-emerald-600" />
@@ -502,8 +569,8 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
                     />
                   </div>
                 </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 pt-2">
+ 
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-3 pt-2">
                   <div className="flex flex-col gap-1">
                     <label className="text-[10px] text-slate-500 font-bold">نقش سیستمی:</label>
                     <select
@@ -527,6 +594,16 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
                       className="bg-slate-50 border border-slate-200 rounded-lg p-2 text-xs font-mono text-left focus:bg-white focus:ring-1 focus:ring-indigo-500"
                     />
                   </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[10px] text-slate-500 font-bold">رمز عبور (Password):</label>
+                    <input
+                      type="text"
+                      placeholder="دلخواه (جهت ورود امن)"
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      className="bg-slate-50 border border-slate-200 rounded-lg p-2 text-xs font-mono text-left focus:bg-white focus:ring-1 focus:ring-indigo-500"
+                    />
+                  </div>
                   <div className="flex items-center gap-2 h-full pt-4">
                     <input
                       type="checkbox"
@@ -535,7 +612,7 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
                       onChange={(e) => setNewCanTranslate(e.target.checked)}
                       className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-slate-300 rounded cursor-pointer"
                     />
-                    <label htmlFor="newCanTranslate" className="text-xs text-slate-700 font-bold cursor-pointer">مجاز به ترجمه تخصصی</label>
+                    <label htmlFor="newCanTranslate" className="text-xs text-slate-700 font-bold cursor-pointer">مجاز به ترجمه</label>
                   </div>
                   <div className="flex items-center gap-2 h-full pt-4">
                     <input
@@ -545,7 +622,7 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
                       onChange={(e) => setNewCanDefineTerms(e.target.checked)}
                       className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-slate-300 rounded cursor-pointer"
                     />
-                    <label htmlFor="newCanDefineTerms" className="text-xs text-slate-700 font-bold cursor-pointer">مجاز به تعریف اصطلاح</label>
+                    <label htmlFor="newCanDefineTerms" className="text-xs text-slate-700 font-bold cursor-pointer">تعریف واژه</label>
                   </div>
                 </div>
 
@@ -601,13 +678,13 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
                     </tr>
                   ) : (
                     adUsers.map((user) => {
-                      const isSupport = currentUser?.username?.toLowerCase() === "support";
+                      const canEdit = currentUser?.username?.toLowerCase() === "support" || currentUser?.role === "Admin";
                       return (
                         <tr key={user.username} className="hover:bg-indigo-50/20 transition-all font-semibold">
                           
                           {/* Active Directory User */}
                           <td className="p-3">
-                            {isSupport ? (
+                            {canEdit ? (
                               <div className="flex flex-col gap-1 max-w-[200px]">
                                 <input
                                   type="text"
@@ -635,18 +712,36 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
                                     placeholder="ایمیل"
                                   />
                                 </div>
+                                <div className="flex items-center gap-1">
+                                  <span className="text-[9px] font-bold text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded shrink-0">رمز:</span>
+                                  <input
+                                    type="text"
+                                    value={user.password || ""}
+                                    onChange={(e) => {
+                                      const val = e.target.value;
+                                      setAdUsers(prev => prev.map(u => u.username === user.username ? { ...u, password: val } : u));
+                                    }}
+                                    onBlur={(e) => updateAdUser(user.username, { password: e.target.value })}
+                                    className="bg-slate-50 border border-slate-200 rounded px-1.5 py-0.5 text-[9px] font-mono text-left focus:bg-white focus:ring-1 focus:ring-indigo-500 w-full"
+                                    dir="ltr"
+                                    placeholder="رمز عبور"
+                                  />
+                                </div>
                               </div>
                             ) : (
                               <div>
                                 <div className="font-black text-slate-800">{user.name}</div>
                                 <div className="text-[9px] text-slate-400 font-mono tracking-wide mt-0.5" dir="ltr">{user.username} | {user.email}</div>
+                                {user.password && (
+                                  <div className="text-[9px] text-amber-600 font-bold mt-0.5" dir="ltr">رمز: {user.password}</div>
+                                )}
                               </div>
                             )}
                           </td>
                           
                           {/* Department */}
                           <td className="p-3">
-                            {isSupport ? (
+                            {canEdit ? (
                               <input
                                 type="text"
                                 value={user.department || ""}
@@ -665,7 +760,7 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
 
                           {/* System Role */}
                           <td className="p-3">
-                            {isSupport ? (
+                            {canEdit ? (
                               <select
                                 value={user.role || "User"}
                                 onChange={(e) => {
@@ -696,9 +791,9 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
                           <td className="p-3 text-center">
                             <button
                               onClick={() => updateAdUser(user.username, { authorized: user.authorized === false ? true : false })}
-                              disabled={!isSupport}
+                              disabled={!canEdit}
                               className={`px-3 py-1.5 rounded-lg text-[10px] font-black transition-all border ${
-                                isSupport ? "cursor-pointer" : "cursor-not-allowed opacity-80"
+                                canEdit ? "cursor-pointer" : "cursor-not-allowed opacity-80"
                               } ${
                                 user.authorized !== false
                                   ? "bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100"
@@ -720,10 +815,10 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
                                 setAdUsers(prev => prev.map(u => u.username === user.username ? { ...u, allowedIp: val } : u));
                               }}
                               onBlur={(e) => updateAdUser(user.username, { allowedIp: e.target.value })}
-                              disabled={!isSupport}
+                              disabled={!canEdit}
                               placeholder="بدون محدودیت IP"
                               className={`w-32 bg-slate-50 border border-slate-200 rounded-lg text-[10px] font-mono px-2 py-1 focus:bg-white focus:ring-1 focus:ring-indigo-500 text-left ${
-                                !isSupport ? "cursor-not-allowed opacity-80" : ""
+                                !canEdit ? "cursor-not-allowed opacity-80" : ""
                               }`}
                               dir="ltr"
                             />
@@ -733,9 +828,9 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
                           <td className="p-3 text-center">
                             <button
                               onClick={() => updateAdUser(user.username, { canTranslate: user.canTranslate === false ? true : false })}
-                              disabled={!isSupport}
+                              disabled={!canEdit}
                               className={`px-2 py-1 rounded-md text-[10px] font-black transition-all ${
-                                isSupport ? "cursor-pointer" : "cursor-not-allowed opacity-80"
+                                canEdit ? "cursor-pointer" : "cursor-not-allowed opacity-80"
                               } ${
                                 user.canTranslate !== false
                                   ? "bg-indigo-50 text-indigo-700 border border-indigo-100 hover:bg-indigo-100"
@@ -751,9 +846,9 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
                           <td className="p-3 text-center">
                             <button
                               onClick={() => updateAdUser(user.username, { canDefineTerms: user.canDefineTerms === false ? true : false })}
-                              disabled={!isSupport}
+                              disabled={!canEdit}
                               className={`px-2 py-1 rounded-md text-[10px] font-black transition-all ${
-                                isSupport ? "cursor-pointer" : "cursor-not-allowed opacity-80"
+                                canEdit ? "cursor-pointer" : "cursor-not-allowed opacity-80"
                               } ${
                                 user.canDefineTerms !== false
                                   ? "bg-cyan-50 text-cyan-700 border border-cyan-100 hover:bg-cyan-100"
@@ -767,7 +862,7 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
 
                           {/* Actions / Delete */}
                           <td className="p-3 text-center">
-                            {isSupport ? (
+                            {canEdit ? (
                               <button
                                 onClick={() => handleDeleteUser(user.username)}
                                 disabled={user.username.toLowerCase() === "support"}
@@ -796,7 +891,7 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
         </div>
       )}
 
-      {adminTab === "dashboard" ? (
+      {adminTab === "dashboard" && (
         <div className="space-y-8 animate-fade-in text-right">
           
           {/* Active Directory Audit log & Active Sessions */}
@@ -1066,7 +1161,9 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
           </div>
 
         </div>
-      ) : (
+      )}
+
+      {adminTab === "docs" && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 animate-fade-in">
           
           {/* Navigation Sidebar */}
@@ -1431,6 +1528,85 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
 
           </div>
 
+        </div>
+      )}
+
+      {adminTab === "apikey" && (
+        <div className="space-y-6 animate-fade-in text-right">
+          <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 sm:p-6 shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-4 mb-4 border-b border-slate-200 pb-3">
+              <div className="flex items-center gap-2">
+                <Key className="h-5 w-5 text-indigo-600 animate-pulse" />
+                <div>
+                  <h3 className="font-black text-slate-800 text-sm">تنظیمات کلید اختصاصی هوش مصنوعی (Gemini API Key Control)</h3>
+                  <p className="text-[10px] text-slate-400 font-bold">پیکربندی، مشاهده زنده و بروزرسانی آنلاین کلید ارتباطی سیستم با سرورهای گوگل</p>
+                </div>
+              </div>
+              <button
+                onClick={fetchApiKey}
+                disabled={isFetchingApiKey}
+                className="text-[10px] bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold px-3 py-1.5 rounded-lg transition-all flex items-center gap-1 cursor-pointer shadow-sm"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${isFetchingApiKey ? "animate-spin" : ""}`} />
+                بروزرسانی وضعیت کلید
+              </button>
+            </div>
+
+            <form onSubmit={handleUpdateApiKey} className="bg-white border border-indigo-50 rounded-xl p-4 sm:p-6 space-y-4 shadow-sm">
+              <div className="flex items-start gap-3 bg-amber-50 border border-amber-100 rounded-lg p-3 text-amber-800 text-xs leading-relaxed font-semibold">
+                <ShieldAlert className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
+                <div>
+                  <h4 className="font-black mb-1">هشدار امنیتی بسیار مهم:</h4>
+                  تغییر کلید API به صورت زنده بر روی موتور هوش مصنوعی پردازشگر فورا اعمال می‌گردد. از صحت و دارا بودن سهمیه معتبر کلید جدید اطمینان حاصل فرمایید. در صورت نادرست بودن کلید، فرآیندهای ترجمه اسناد و استخراج متن با خطا مواجه خواهند شد.
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <label className="text-xs font-bold text-slate-700">کلید هوش مصنوعی فعال (Gemini API Key):</label>
+                <div className="relative">
+                  <input
+                    type={showApiKey ? "text" : "password"}
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    placeholder="AIzaSy..."
+                    dir="ltr"
+                    className="w-full bg-slate-50 border border-slate-200 rounded-lg p-3 pl-12 text-xs font-mono tracking-wider text-left focus:bg-white focus:ring-2 focus:ring-indigo-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowApiKey(!showApiKey)}
+                    className="absolute inset-y-0 left-3 flex items-center text-slate-400 hover:text-slate-600 cursor-pointer"
+                  >
+                    {showApiKey ? (
+                      <EyeOff className="h-4 w-4" />
+                    ) : (
+                      <Eye className="h-4 w-4" />
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex justify-end pt-2">
+                <button
+                  type="submit"
+                  disabled={isUpdatingApiKey}
+                  className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-black px-6 py-2.5 rounded-lg flex items-center gap-2 cursor-pointer transition-all shadow-md"
+                >
+                  {isUpdatingApiKey ? (
+                    <>
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                      <span>در حال ذخیره‌سازی...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Save className="h-4 w-4" />
+                      <span>ذخیره و فعال‌سازی کلید جدید</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
 

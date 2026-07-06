@@ -13,6 +13,7 @@ export interface ADUser {
   canTranslate?: boolean;
   canDefineTerms?: boolean;
   computerName?: string;
+  password?: string;
 }
 
 export type TranslationEngineType = 'NLLB-200' | 'MarianMT' | 'LibreTranslate' | 'SeamlessM4T' | 'OpenAI' | 'DeepL' | 'Azure' | 'GoogleCloud';
