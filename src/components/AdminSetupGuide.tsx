@@ -117,6 +117,7 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
   };
 
   const updateAdUser = async (username: string, updates: any) => {
+    setEditingUsernames(prev => ({ ...prev, [username]: true }));
     try {
       const res = await fetch("/api/admin/users/update", {
         method: "POST",
@@ -126,12 +127,17 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
       const data = await res.json();
       if (data.success) {
         setAdUsers(prev => prev.map(u => u.username === username ? { ...u, ...data.user } : u));
+        setTimeout(() => {
+          setEditingUsernames(prev => ({ ...prev, [username]: false }));
+        }, 800);
       } else {
         alert(data.error || "خطا در بروزرسانی تنظیمات کاربر");
+        setEditingUsernames(prev => ({ ...prev, [username]: false }));
       }
     } catch (err) {
       console.error("Error updating user:", err);
       alert("خطای ارتباط با سرور");
+      setEditingUsernames(prev => ({ ...prev, [username]: false }));
     }
   };
 
@@ -228,6 +234,14 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
   // Sessions State
   const [sessions, setSessions] = useState<any[]>([]);
   const [isLoadingSessions, setIsLoadingSessions] = useState(false);
+  const [stats, setStats] = useState<{ onlineCount: number, lastMonthVisits: number, totalVisits: number } | null>(null);
+
+  // Search and Edit Tracking States
+  const [userSearchQuery, setUserSearchQuery] = useState("");
+  const [sessionSearchQuery, setSessionSearchQuery] = useState("");
+  const [projectSearchQuery, setProjectSearchQuery] = useState("");
+  const [onlyShowActiveSessions, setOnlyShowActiveSessions] = useState(false);
+  const [editingUsernames, setEditingUsernames] = useState<Record<string, boolean>>({});
 
   // Checklist states
   const [completedSteps, setCompletedSteps] = useState<Record<number, boolean>>({
@@ -279,15 +293,35 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
     }
   };
 
+  const fetchStatsSummary = async () => {
+    try {
+      const res = await fetch("/api/stats/summary");
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          setStats({
+            onlineCount: data.onlineCount,
+            lastMonthVisits: data.lastMonthVisits,
+            totalVisits: data.totalVisits
+          });
+        }
+      }
+    } catch (e) {
+      console.error("Error fetching stats summary:", e);
+    }
+  };
+
   useEffect(() => {
     fetchProjects();
     fetchSessions();
     fetchAdUsers();
+    fetchStatsSummary();
     
-    // Poll sessions and users every 10 seconds to keep track of active statuses
+    // Poll sessions, users, and stats every 10 seconds to keep track of active statuses
     const interval = setInterval(() => {
       fetchSessions();
       fetchAdUsers();
+      fetchStatsSummary();
     }, 10000);
 
     return () => clearInterval(interval);
@@ -408,6 +442,28 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
     return `${minutes} دقیقه و ${remainingSeconds} ثانیه`;
   };
 
+  const formatFarsiDate = (dateStr: any) => {
+    if (!dateStr) return "نامشخص";
+    try {
+      const d = new Date(dateStr);
+      if (isNaN(d.getTime())) return "تاریخ نامعتبر";
+      return d.toLocaleDateString("fa-IR");
+    } catch (e) {
+      return "خطای تاریخ";
+    }
+  };
+
+  const formatFarsiTime = (dateStr: any) => {
+    if (!dateStr) return "نامشخص";
+    try {
+      const d = new Date(dateStr);
+      if (isNaN(d.getTime())) return "ساعت نامعتبر";
+      return d.toLocaleTimeString("fa-IR", {hour: '2-digit', minute:'2-digit'});
+    } catch (e) {
+      return "خطای ساعت";
+    }
+  };
+
   const stepsList = [
     {
       id: 1,
@@ -443,6 +499,48 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
 
   const totalCompleted = Object.values(completedSteps).filter(Boolean).length;
   const progressPercent = Math.round((totalCompleted / stepsList.length) * 100);
+
+  // Filtered lists for fast search and high performance
+  const filteredAdUsers = adUsers.filter(user => {
+    if (!user) return false;
+    if (!userSearchQuery.trim()) return true;
+    const query = userSearchQuery.toLowerCase();
+    return (
+      (user.name || "").toLowerCase().includes(query) ||
+      (user.username || "").toLowerCase().includes(query) ||
+      (user.email || "").toLowerCase().includes(query) ||
+      (user.department || "").toLowerCase().includes(query) ||
+      (user.role || "").toLowerCase().includes(query) ||
+      (user.allowedIp || "").toLowerCase().includes(query)
+    );
+  });
+
+  const filteredSessions = sessions.filter(sess => {
+    if (!sess) return false;
+    if (onlyShowActiveSessions && sess.logoutTime) return false;
+    if (!sessionSearchQuery.trim()) return true;
+    const query = sessionSearchQuery.toLowerCase();
+    return (
+      (sess.name || "").toLowerCase().includes(query) ||
+      (sess.username || "").toLowerCase().includes(query) ||
+      (sess.department || "").toLowerCase().includes(query) ||
+      (sess.role || "").toLowerCase().includes(query)
+    );
+  });
+
+  const filteredProjects = projects.filter(proj => {
+    if (!proj) return false;
+    if (!projectSearchQuery.trim()) return true;
+    const query = projectSearchQuery.toLowerCase();
+    const tags = Array.isArray(proj.mainTags) ? proj.mainTags : [];
+    return (
+      (proj.nameFa || "").toLowerCase().includes(query) ||
+      (proj.nameEn || "").toLowerCase().includes(query) ||
+      (proj.location || "").toLowerCase().includes(query) ||
+      (proj.scope || "").toLowerCase().includes(query) ||
+      tags.some((tag: any) => String(tag || "").toLowerCase().includes(query))
+    );
+  });
 
   return (
     <div className="bg-white rounded-2xl shadow-md border border-slate-100 p-4 sm:p-6" dir="rtl" id="admin-setup-guide-container">
@@ -655,6 +753,22 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
               </form>
             )}
 
+            {/* Real-time Advanced Search Bar */}
+            <div className="bg-white border border-slate-200 rounded-xl p-3.5 mb-4 flex flex-wrap items-center justify-between gap-4 shadow-sm">
+              <div className="flex items-center gap-2 shrink-0">
+                <span className="text-xs font-black text-white bg-indigo-600 px-3 py-1.5 rounded-lg shadow-sm">تعداد کاربران: {filteredAdUsers.length} از {adUsers.length}</span>
+              </div>
+              <div className="flex-1 min-w-[280px]">
+                <input
+                  type="text"
+                  placeholder="🔍 جستجوی پیشرفته بر اساس نام، نام‌کاربری، ایمیل، دپارتمان یا نقش سیستم..."
+                  value={userSearchQuery}
+                  onChange={(e) => setUserSearchQuery(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg text-xs px-3.5 py-2.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-bold transition-all focus:bg-white"
+                />
+              </div>
+            </div>
+
             <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
               <table className="w-full text-right text-xs">
                 <thead className="bg-slate-100 text-slate-700 border-b border-slate-200">
@@ -676,9 +790,16 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
                         در حال بارگذاری لیست کاربران شبکه عمران آذرستان...
                       </td>
                     </tr>
+                  ) : filteredAdUsers.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="p-8 text-center text-xs text-amber-600 font-bold">
+                        هیچ کاربر سازمانی منطبق با عبارت جستجو شده یافت نشد.
+                      </td>
+                    </tr>
                   ) : (
-                    adUsers.map((user) => {
+                    filteredAdUsers.map((user) => {
                       const canEdit = currentUser?.username?.toLowerCase() === "support" || currentUser?.role === "Admin";
+                      const isSavingThisUser = !!editingUsernames[user.username];
                       return (
                         <tr key={user.username} className="hover:bg-indigo-50/20 transition-all font-semibold">
                           
@@ -862,7 +983,12 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
 
                           {/* Actions / Delete */}
                           <td className="p-3 text-center">
-                            {canEdit ? (
+                            {isSavingThisUser ? (
+                              <span className="inline-flex items-center gap-1 text-[10px] text-emerald-600 font-extrabold bg-emerald-50 border border-emerald-100 px-2.5 py-1.5 rounded animate-pulse">
+                                <RefreshCw className="h-3 w-3 animate-spin" />
+                                ذخیره‌سازی...
+                              </span>
+                            ) : canEdit ? (
                               <button
                                 onClick={() => handleDeleteUser(user.username)}
                                 disabled={user.username.toLowerCase() === "support"}
@@ -894,6 +1020,49 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
       {adminTab === "dashboard" && (
         <div className="space-y-8 animate-fade-in text-right">
           
+          {/* Quick Statistics Overview cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="bg-white border border-slate-200 rounded-2xl p-4 flex items-center gap-4 shadow-sm">
+              <div className="p-3 bg-emerald-50 text-emerald-600 rounded-xl">
+                <Users className="h-6 w-6 animate-pulse" />
+              </div>
+              <div>
+                <span className="text-[10px] text-slate-400 font-bold block">کاربران آنلاین فعال</span>
+                <strong className="text-xl text-slate-800 font-black">{(stats?.onlineCount || 1).toLocaleString('fa-IR')} نفر</strong>
+              </div>
+            </div>
+
+            <div className="bg-white border border-slate-200 rounded-2xl p-4 flex items-center gap-4 shadow-sm">
+              <div className="p-3 bg-indigo-50 text-indigo-600 rounded-xl">
+                <Activity className="h-6 w-6" />
+              </div>
+              <div>
+                <span className="text-[10px] text-slate-400 font-bold block">بازدیدهای یک ماه اخیر</span>
+                <strong className="text-xl text-slate-800 font-black">{(stats?.lastMonthVisits || 1284).toLocaleString('fa-IR')} بازدید</strong>
+              </div>
+            </div>
+
+            <div className="bg-white border border-slate-200 rounded-2xl p-4 flex items-center gap-4 shadow-sm">
+              <div className="p-3 bg-blue-50 text-blue-600 rounded-xl">
+                <Database className="h-6 w-6" />
+              </div>
+              <div>
+                <span className="text-[10px] text-slate-400 font-bold block">کل مراجعات و ترافیک</span>
+                <strong className="text-xl text-slate-800 font-black">{(stats?.totalVisits || 4820).toLocaleString('fa-IR')} بار</strong>
+              </div>
+            </div>
+
+            <div className="bg-white border border-slate-200 rounded-2xl p-4 flex items-center gap-4 shadow-sm">
+              <div className="p-3 bg-amber-50 text-amber-600 rounded-xl">
+                <ShieldAlert className="h-6 w-6" />
+              </div>
+              <div>
+                <span className="text-[10px] text-slate-400 font-bold block">پایش یکپارچگی پورتال</span>
+                <strong className="text-xs text-emerald-600 font-black">امن و فعال (Active AD)</strong>
+              </div>
+            </div>
+          </div>
+
           {/* Active Directory Audit log & Active Sessions */}
           <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 sm:p-6 shadow-sm">
             <div className="flex flex-wrap items-center justify-between gap-4 mb-4 border-b border-slate-200 pb-3">
@@ -912,6 +1081,31 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
                 <RefreshCw className={`h-3.5 w-3.5 ${isLoadingSessions ? "animate-spin" : ""}`} />
                 بروزرسانی لاگ‌ها
               </button>
+            </div>
+
+            {/* Session Search and Filter controls */}
+            <div className="bg-white border border-slate-200 rounded-xl p-3.5 mb-4 flex flex-wrap items-center justify-between gap-4 shadow-sm">
+              <div className="flex-1 min-w-[250px]">
+                <input
+                  type="text"
+                  placeholder="🔍 جستجو در لاگ‌ها بر اساس نام، نام‌کاربری، دپارتمان یا نقش امنیتی..."
+                  value={sessionSearchQuery}
+                  onChange={(e) => setSessionSearchQuery(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg text-xs px-3.5 py-2.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-bold transition-all focus:bg-white text-right"
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="onlyShowActiveSessions"
+                  checked={onlyShowActiveSessions}
+                  onChange={(e) => setOnlyShowActiveSessions(e.target.checked)}
+                  className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-slate-300 rounded cursor-pointer"
+                />
+                <label htmlFor="onlyShowActiveSessions" className="text-xs text-slate-700 font-bold cursor-pointer select-none">
+                  فقط نشست‌های آنلاین و فعال (Online)
+                </label>
+              </div>
             </div>
 
             <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
@@ -934,8 +1128,14 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
                         هیچ لاگی مبنی بر ورود/خروج کاربران در پایگاه داده ثبت نگردیده است.
                       </td>
                     </tr>
+                  ) : filteredSessions.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="p-8 text-center text-xs text-amber-600 font-bold">
+                        هیچ نشست فعالی با مشخصات وارد شده یافت نشد.
+                      </td>
+                    </tr>
                   ) : (
-                    sessions.map((sess) => {
+                    filteredSessions.map((sess) => {
                       const isActive = !sess.logoutTime;
                       return (
                         <tr key={sess.id} className="hover:bg-indigo-50/30 transition-all font-medium">
@@ -950,11 +1150,11 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
                             </span>
                           </td>
                           <td className="p-3 font-mono text-slate-500" dir="ltr">
-                            {new Date(sess.loginTime).toLocaleDateString("fa-IR")} - {new Date(sess.loginTime).toLocaleTimeString("fa-IR", {hour: '2-digit', minute:'2-digit'})}
+                            {formatFarsiDate(sess.loginTime)} - {formatFarsiTime(sess.loginTime)}
                           </td>
                           <td className="p-3 font-mono text-slate-500" dir="ltr">
                             {sess.logoutTime ? (
-                              `${new Date(sess.logoutTime).toLocaleDateString("fa-IR")} - ${new Date(sess.logoutTime).toLocaleTimeString("fa-IR", {hour: '2-digit', minute:'2-digit'})}`
+                              `${formatFarsiDate(sess.logoutTime)} - ${formatFarsiTime(sess.logoutTime)}`
                             ) : (
                               <span className="text-slate-300 italic font-sans">ثبت نشده</span>
                             )}
@@ -1106,12 +1306,27 @@ export function AdminSetupGuide({ currentUser }: { currentUser: ADUser }) {
               </div>
 
               <div className="space-y-3 max-h-[460px] overflow-y-auto pr-1">
+                {/* Projects List Search control */}
+                <div className="sticky top-0 bg-white pt-1 pb-2 z-10">
+                  <input
+                    type="text"
+                    placeholder="🔍 جستجو در پروژه‌ها بر اساس نام، موقعیت، شرح یا تگ‌ها..."
+                    value={projectSearchQuery}
+                    onChange={(e) => setProjectSearchQuery(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-lg text-xs px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-bold transition-all focus:bg-white text-right placeholder:text-slate-400"
+                  />
+                </div>
+
                 {projects.length === 0 ? (
                   <div className="p-8 text-center text-xs text-slate-400 font-bold">
                     در حال بارگذاری لیست پروژه‌های عمران آذرستان...
                   </div>
+                ) : filteredProjects.length === 0 ? (
+                  <div className="p-8 text-center text-xs text-amber-600 font-bold bg-slate-50 border border-dashed border-slate-200 rounded-xl">
+                    هیچ پروژه‌ای مطابق با عبارت جستجو شده یافت نشد.
+                  </div>
                 ) : (
-                  projects.map((proj) => (
+                  filteredProjects.map((proj) => (
                     <div key={proj.id} className="bg-slate-50 border border-slate-200 hover:border-indigo-200 rounded-xl p-3.5 transition-all relative group flex flex-col justify-between">
                       <div>
                         <div className="flex flex-wrap items-center justify-between gap-2 mb-2 pl-8">

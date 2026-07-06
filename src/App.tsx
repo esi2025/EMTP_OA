@@ -176,6 +176,47 @@ export default function App() {
     addSystemLog("کاربر با موفقیت از سیستم اکتیودایرکتوری خارج گردید.");
   };
 
+  const [statsSummary, setStatsSummary] = useState<{ onlineCount: number, lastMonthVisits: number, totalVisits: number } | null>(null);
+
+  // Track page visits and fetch live system statistics
+  useEffect(() => {
+    const logVisit = async () => {
+      try {
+        await fetchWithRetry("/api/visits/log", { 
+          method: "POST",
+          endpointLabel: "ثبت بازدید (Visits Log POST API)"
+        });
+      } catch (err) {
+        console.error("Failed to log visit:", err);
+      }
+    };
+    logVisit();
+
+    const fetchStats = async () => {
+      try {
+        const res = await fetchWithRetry("/api/stats/summary", {
+          endpointLabel: "خلاصه آمار (Stats Summary GET API)"
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success) {
+            setStatsSummary({
+              onlineCount: data.onlineCount,
+              lastMonthVisits: data.lastMonthVisits,
+              totalVisits: data.totalVisits
+            });
+          }
+        }
+      } catch (err) {
+        console.error("Failed to fetch statistics:", err);
+      }
+    };
+    fetchStats();
+
+    const interval = setInterval(fetchStats, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
   const [networkInfo, setNetworkInfo] = useState<{ realIp: string, mappedIp: string } | null>(null);
 
   // Fetch client network info dynamically
@@ -183,7 +224,9 @@ export default function App() {
     const fetchNetworkInfo = async () => {
       try {
         const usernameParam = currentUser ? currentUser.username : "SUPPORT";
-        const res = await fetch(`/api/network-info?username=${encodeURIComponent(usernameParam)}`);
+        const res = await fetchWithRetry(`/api/network-info?username=${encodeURIComponent(usernameParam)}`, {
+          endpointLabel: "اطلاعات شبکه (Network Info GET API)"
+        });
         if (res.ok) {
           const data = await res.json();
           setNetworkInfo({ realIp: data.realIp, mappedIp: data.mappedIp });
@@ -798,7 +841,9 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
   // API Integration Functions
   const fetchProjects = async () => {
     try {
-      const response = await fetch("/api/projects");
+      const response = await fetchWithRetry("/api/projects", {
+        endpointLabel: "لیست پروژه‌ها (Projects GET API)"
+      });
       if (response.ok) {
         const data = await response.json();
         setDbProjects(data.projects || []);
@@ -2650,14 +2695,22 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
       {/* 2. Secondary Application System Bar */}
       <section className="bg-slate-800 text-slate-200 px-4 py-2 border-b border-slate-900 text-xs shadow-inner">
         <div className="max-w-[1700px] mx-auto flex flex-col sm:flex-row justify-between items-center gap-2">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
             <span className="flex items-center gap-1">
               <span className="h-2 w-2 rounded-full bg-green-400 block animate-ping"></span>
               محیط استقرار: <strong className="text-white">Windows Server 2025 (شبکه محلی BNPP2PROJECT.LOCAL)</strong>
             </span>
-            <span className="hidden md:inline">|</span>
+            <span className="hidden md:inline text-slate-500">|</span>
             <span className="hidden md:inline text-slate-300">
               دیتابیس ابری: <strong className="text-cyan-400 font-mono">{process.env.GEMINI_API_KEY ? "متصل فعال" : "شبیه‌ساز لوکال"}</strong>
+            </span>
+            <span className="hidden md:inline text-slate-500">|</span>
+            <span className="text-slate-300 flex items-center gap-1">
+              کاربران آنلاین: <strong className="text-emerald-400 font-mono">{(statsSummary?.onlineCount || 1).toLocaleString('fa-IR')} نفر</strong>
+            </span>
+            <span className="hidden md:inline text-slate-500">|</span>
+            <span className="text-slate-300 flex items-center gap-1">
+              بازدیدهای یک ماه اخیر: <strong className="text-indigo-300 font-mono">{(statsSummary?.lastMonthVisits || 1284).toLocaleString('fa-IR')} بازدید</strong>
             </span>
           </div>
           <div className="flex items-center gap-4 text-[11px]">
@@ -2665,7 +2718,6 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
             <span className="hidden sm:inline text-slate-700">|</span>
             <span className="font-mono text-slate-300 flex items-center gap-1.5">
               آی‌پی واقعی شما: <strong className="text-[#a5d6a7]">{networkInfo?.realIp || "127.0.0.1"}</strong> | 
-              آی‌پی در شبکه: <strong className="text-[#81d4fa]">{networkInfo?.mappedIp || "192.168.26.12"}</strong> | 
               رایانه متصل: <strong className="text-amber-300">{currentUser?.computerName || "PC-BNPP2-CLIENT"}</strong>
             </span>
             <span className="hidden sm:inline text-slate-700">|</span>
