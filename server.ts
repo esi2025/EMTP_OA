@@ -1377,124 +1377,138 @@ app.post("/api/ocr", async (req, res) => {
     roiInstruction += ` Focus EXCLUSIVELY on the custom Region of Interest (ROI) bounding box coordinates defined by: y-start: ${coordinates.yMin}%, x-start: ${coordinates.xMin}%, y-end: ${coordinates.yMax}%, x-end: ${coordinates.xMax}% (normalized with 0,0 top-left and 100,100 bottom-right). ABSOLUTELY ignore any letters or diagrams outside this rectangular ROI zone.`;
   }
 
-  const ai = getGeminiClient();
-  let runOfflineFallback = !ai;
+  // Generate fallback text early so we have it available for both try-catch and empty-client scenarios
+  const roiLabel = roiPreset === "heading" ? "بخش بالایی/سربرگ" 
+                  : roiPreset === "footer_table" ? "بخش پایینی/جدول مشخصات" 
+                  : roiPreset === "left_pane" ? "بخش سمت چپ سند" 
+                  : roiPreset === "right_pane" ? "بخش سمت راست سند"
+                  : roiPreset === "custom" && coordinates ? `محدوده دست‌ساز (X: ${coordinates.xMin}%-${coordinates.xMax}%, Y: ${coordinates.yMin}%-${coordinates.yMax}%)`
+                  : "کل پهنه تصویر فایل";
 
-  if (ai) {
-    try {
-      // Robust base64 and MIME type parser
-      let cleanBase64 = imageBase64;
-      let actualMimeType = mimeType || "image/png";
-
-      if (imageBase64.includes(";base64,")) {
-        const parts = imageBase64.split(";base64,");
-        cleanBase64 = parts[1];
-        const mimeMatch = parts[0].match(/data:(.*?)$/);
-        if (mimeMatch) {
-          actualMimeType = mimeMatch[1];
-        }
-      } else if (imageBase64.includes(",")) {
-        cleanBase64 = imageBase64.split(",")[1];
-      }
-
-      // Strip any leading comma left over after stripping data URL scheme
-      if (cleanBase64.startsWith(",")) {
-        cleanBase64 = cleanBase64.substring(1);
-      }
-
-      // Map image/jpg to image/jpeg which Gemini expects
-      if (actualMimeType === "image/jpg") {
-        actualMimeType = "image/jpeg";
-      }
-
-      // Restrict to standard types that Gemini supports
-      if (!actualMimeType.startsWith("image/") && actualMimeType !== "application/pdf") {
-        actualMimeType = "image/png"; // fallback to standard image
-      }
-
-      const imagePart = {
-        inlineData: {
-          mimeType: actualMimeType,
-          data: cleanBase64.trim(),
-        },
-      };
-
-      const promptText = `You are a professional industrial OCR system.
-${modelInstruction}
-${roiInstruction}
-Output the final extracted text clearly in Persian or English based on the image's layout. Do not write introductory words like 'Here is the extracted text:'. Just output the extracted text directly.`;
-
-      const textPart = {
-        text: promptText,
-      };
-
-      // Use the standard parts format for reliable multi-modal content generation
-      const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: { parts: [imagePart, textPart] },
-        config: {
-          temperature: 0.1
-        }
-      });
-
-      return res.json({
-        success: true,
-        extractedText: response.text || "نویسه‌خوان قادر به استخراج متنی از تصویر بارگذاری شده نبود.",
-        usedModel: modelType || 'general',
-        usedPreset: roiPreset || 'full'
-      });
-    } catch (e: any) {
-      console.warn("Gemini OCR error, falling back to offline OCR simulator. Details:", e.message || e);
-      runOfflineFallback = true;
-    }
-  }
-
-  if (runOfflineFallback) {
-    // Highly interactive demonstration fallback that simulates ROI-based changes to feel extremely real!
-    let fallbackText = "";
-
-    const roiLabel = roiPreset === "heading" ? "بخش بالایی/سربرگ" 
-                    : roiPreset === "footer_table" ? "بخش پایینی/جدول مشخصات" 
-                    : roiPreset === "left_pane" ? "بخش سمت چپ سند" 
-                    : roiPreset === "right_pane" ? "بخش سمت راست سند"
-                    : roiPreset === "custom" && coordinates ? `محدوده دست‌ساز (X: ${coordinates.xMin}%-${coordinates.xMax}%, Y: ${coordinates.yMin}%-${coordinates.yMax}%)`
-                    : "کل پهنه تصویر فایل";
-
-    if (modelType === "handwritten") {
-      fallbackText = `[سیستم شبیه‌ساز آفلاین OCR - مدل متون دست‌نویس کارگاهی فعال است]
-منطقه پردازش شده: ${roiLabel}
------------------------------------------------------------
-یادداشت خودکار مهندس ناظر مقیم کارگاه (Onsite Handwritten Markup Report):
+  let fallbackText = "";
+  if (modelType === "handwritten") {
+    fallbackText = `یادداشت خودکار مهندس ناظر مقیم کارگاه (Onsite Handwritten Markup Report):
 - بررسی مقاومت فشاری بتن پایه ستون شماره ۳؛ ضخامت مشهود شاتکریت کمتر از ۱۵۰ میلی‌متر بود (اصلاح شود).
 - کنترل آنکراژ ردیف دوم انجام شد. کشش مجدد بولت‌ها برای فردا هماهنگ گردد.
 - تاریخ چک‌لیست عزل: ۱۴۰۵/۰۳/۲۷
+- فرستنده: بخش فنی کارگاه مترو تهران ۷
 امضا ناظر: ع. محمدی`;
-    } else if (modelType === "technical_diagram") {
-      fallbackText = `[سیستم شبیه‌ساز آفلاین OCR - مدل نقشه‌های شاپ دراوینگ و کاد فعال است]
-منطقه پردازش شده: ${roiLabel}
------------------------------------------------------------
-کدهای تراز مقطعی و مختصات (CAD Elevation Symbols & Alignment Grid lines):
+  } else if (modelType === "technical_diagram") {
+    fallbackText = `کدهای تراز مقطعی و مختصات (CAD Elevation Symbols & Alignment Grid lines):
 - Gridline Ref: [A-4] - [D-12]
 - TOP LEVEL: ELEVATION +24.50m (Slab finish)
 - BOTTOM LEVEL: ELEVATION +4.20m (Foundation base)
 - DOUBLE ROW ANCHORS: Anchor force T = 450kN per anchor spacer.
 - LEVEL GRADIENT: s = 0.5% dynamic slope for drainage pipe.`;
-    } else {
-      fallbackText = `[سیستم شبیه‌ساز آفلاین OCR - مدل عمومی و چاپی اسناد فعال است]
-منطقه پردازش شده: ${roiLabel}
------------------------------------------------------------
-Omran Azarestan Engineering Division Spec Paper:
+  } else {
+    fallbackText = `Omran Azarestan Engineering Division Spec Paper:
 - پروژه مرجع: تونل ریلی و ایستگاه‌های مترو خط ۷ تهران
 - عمق حفاری نهایی مقطع شفت میانی: ۲۴.۵ متر
 - المان‌های پایدارسازی: نیلینگ و آنکراژ دو ردیفه با ضخامت شاتکریت دیواره ۱۵ سانتی‌متر
 - فونداسیون تیپ C25 بتن‌ریزی مسلح با آرماتوربندی متراکم`;
-    }
+  }
+
+  const ai = getGeminiClient();
+
+  if (!ai) {
+    const notice = `[راهنمای فعال‌سازی - شبیه‌ساز هوشمند فعال است]
+⚠️ توجه: کلید معتبر هوش مصنوعی (GEMINI_API_KEY) در بخش تنظیمات AI Studio (Secrets) ثبت نشده است. جهت اجرای استخراج متن زنده و واقعی روی تصاویر ارسالی شما، لطفاً کلید معتبر خود را در بخش Secrets اضافه نمایید. در حال حاضر تصویر در پهنه "${roiLabel}" به شکل شبیه‌سازی هوشمند پردازش می‌شود:
+
+-----------------------------------------------------------
+${fallbackText}`;
 
     return res.json({
       success: true,
-      extractedText: fallbackText,
+      extractedText: notice,
       usedModel: modelType || 'general',
-      usedPreset: roiPreset || 'full'
+      usedPreset: roiPreset || 'full',
+      isOfflineFallback: true,
+      errorMessage: "GEMINI_API_KEY not configured"
+    });
+  }
+
+  try {
+    // Robust base64 and MIME type parser
+    let cleanBase64 = imageBase64;
+    let actualMimeType = mimeType || "image/png";
+
+    if (imageBase64.includes(";base64,")) {
+      const parts = imageBase64.split(";base64,");
+      cleanBase64 = parts[1];
+      const mimeMatch = parts[0].match(/data:(.*?)$/);
+      if (mimeMatch) {
+        actualMimeType = mimeMatch[1];
+      }
+    } else if (imageBase64.includes(",")) {
+      cleanBase64 = imageBase64.split(",")[1];
+    }
+
+    // Strip any leading comma left over after stripping data URL scheme
+    if (cleanBase64.startsWith(",")) {
+      cleanBase64 = cleanBase64.substring(1);
+    }
+
+    // Comprehensive whitespace and newline cleanup for raw base64 data
+    cleanBase64 = cleanBase64.replace(/\s/g, "");
+
+    // Map image/jpg to image/jpeg which Gemini expects
+    if (actualMimeType === "image/jpg") {
+      actualMimeType = "image/jpeg";
+    }
+
+    // Restrict to standard types that Gemini supports
+    if (!actualMimeType.startsWith("image/") && actualMimeType !== "application/pdf") {
+      actualMimeType = "image/png"; // fallback to standard image
+    }
+
+    const promptText = `You are a professional industrial OCR system.
+${modelInstruction}
+${roiInstruction}
+Output the final extracted text clearly in Persian or English based on the image's layout. Do not write introductory words like 'Here is the extracted text:'. Just output the extracted text directly.`;
+
+    // Use the standard array format for reliable multi-modal content generation
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: [
+        promptText,
+        {
+          inlineData: {
+            mimeType: actualMimeType,
+            data: cleanBase64,
+          },
+        },
+      ],
+      config: {
+        temperature: 0.1
+      }
+    });
+
+    return res.json({
+      success: true,
+      extractedText: response.text || "نویسه‌خوان قادر به استخراج متنی از تصویر بارگذاری شده نبود.",
+      usedModel: modelType || 'general',
+      usedPreset: roiPreset || 'full',
+      isOfflineFallback: false
+    });
+  } catch (e: any) {
+    console.warn("Gemini OCR error, falling back to offline OCR simulator. Details:", e.message || e);
+    
+    const notice = `[خطای سامانه هوش مصنوعی - شبیه‌ساز کمکی فعال شد]
+⚠️ توجه: هنگام ارسال تصویر به سرور هوش مصنوعی خطایی رخ داد.
+جزئیات خطا: ${e.message || String(e)}
+
+تصویر در محدوده "${roiLabel}" با موفقیت تحلیل گردید اما به دلیل خطای بالا، خروجی شبیه‌سازی شده نمایش داده می‌شود. لطفاً کلید ثبت شده را در بخش Secrets مجدداً بررسی کنید.
+
+-----------------------------------------------------------
+${fallbackText}`;
+
+    return res.json({
+      success: true,
+      extractedText: notice,
+      usedModel: modelType || 'general',
+      usedPreset: roiPreset || 'full',
+      isOfflineFallback: true,
+      errorMessage: e.message || String(e)
     });
   }
 });

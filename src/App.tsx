@@ -315,6 +315,7 @@ export default function App() {
   const [ocrImage, setOcrImage] = useState<string | null>(null);
   const [ocrImageName, setOcrImageName] = useState("");
   const [isProcessingOcr, setIsProcessingOcr] = useState(false);
+  const [isOcrFallback, setIsOcrFallback] = useState(false);
   const [ocrExtractedText, setOcrExtractedText] = useState("");
   const [ocrModelType, setOcrModelType] = useState<"general" | "printed" | "handwritten" | "technical_diagram">("general");
   const [ocrRoiPreset, setOcrRoiPreset] = useState<"full" | "heading" | "footer_table" | "left_pane" | "right_pane" | "custom">("full");
@@ -1576,20 +1577,6 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
           setIsDictating(true);
           setSttProgressMessage("میکروفون فعال شد. در حال شنیدن گفتار تخصصی شما...");
           addSystemLog("میکروفون سیستم فعال شد. آماده دریافت سیگنال‌های صوتی.");
-
-          if (sttTimeoutRef.current) clearTimeout(sttTimeoutRef.current);
-          sttTimeoutRef.current = setTimeout(() => {
-            if (!hasReceivedSpeechRef.current) {
-              console.warn("No speech received within 6s timeout limit.");
-              try {
-                recognition.stop();
-              } catch (e) {}
-              setIsDictating(false);
-              setSttProgressMessage("عدم موفقیت در دریافت صدا");
-              addSystemLog("عدم موفقیت در دریافت صدا (عدم وجود سیگنال صوتی).");
-              alert("عدم موفقیت در دریافت صدا. هیچ سیگنال صوتی از میکروفون شما دریافت نشد.");
-            }
-          }, 6000);
         };
 
         recognition.onresult = (event: any) => {
@@ -1715,6 +1702,79 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
     }
   };
 
+  // Helper to physically crop the uploaded image to the selected Region of Interest (ROI)
+  const cropOcrImage = (
+    base64Str: string,
+    preset: string,
+    coords: { xMin: number; xMax: number; yMin: number; yMax: number }
+  ): Promise<string> => {
+    return new Promise((resolve) => {
+      if (!base64Str.startsWith("data:image/")) {
+        resolve(base64Str);
+        return;
+      }
+
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = () => {
+        try {
+          let x = 0;
+          let y = 0;
+          let w = img.naturalWidth;
+          let h = img.naturalHeight;
+
+          if (preset === "heading") {
+            x = 0;
+            y = 0;
+            w = img.naturalWidth;
+            h = Math.round(img.naturalHeight * 0.3);
+          } else if (preset === "footer_table") {
+            x = 0;
+            y = Math.round(img.naturalHeight * 0.6);
+            w = img.naturalWidth;
+            h = Math.round(img.naturalHeight * 0.4);
+          } else if (preset === "left_pane") {
+            x = 0;
+            y = 0;
+            w = Math.round(img.naturalWidth * 0.5);
+            h = img.naturalHeight;
+          } else if (preset === "right_pane") {
+            x = Math.round(img.naturalWidth * 0.5);
+            y = 0;
+            w = Math.round(img.naturalWidth * 0.5);
+            h = img.naturalHeight;
+          } else if (preset === "custom" && coords) {
+            x = Math.round(img.naturalWidth * (coords.xMin / 100));
+            y = Math.round(img.naturalHeight * (coords.yMin / 100));
+            w = Math.round(img.naturalWidth * ((coords.xMax - coords.xMin) / 100));
+            h = Math.round(img.naturalHeight * ((coords.yMax - coords.yMin) / 100));
+          }
+
+          if (w <= 0) w = 1;
+          if (h <= 0) h = 1;
+
+          const canvas = document.createElement("canvas");
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext("2d");
+          if (ctx) {
+            ctx.drawImage(img, x, y, w, h, 0, 0, w, h);
+            resolve(canvas.toDataURL("image/png"));
+          } else {
+            resolve(base64Str);
+          }
+        } catch (err) {
+          console.error("Error cropping image:", err);
+          resolve(base64Str);
+        }
+      };
+      img.onerror = () => {
+        resolve(base64Str);
+      };
+      img.src = base64Str;
+    });
+  };
+
   // Unified dynamic OCR processing function
   const executeOcrExtraction = async (targetImg: string | null = ocrImage) => {
     const imgData = targetImg || ocrImage;
@@ -1727,12 +1787,18 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
     setIsProcessingOcr(true);
     let currentModel = ocrModelType;
     addSystemLog(`آغاز استخراج OCR: سگمنت "${ocrRoiPreset}" | مدل موتور "${currentModel}"`);
+
+    let processedImgData = imgData;
+    if (ocrRoiPreset !== "full") {
+      addSystemLog(`در حال ممیزی و برش فیزیکی تصویر بر اساس محدوده انتخابی "${ocrRoiPreset}" جهت بهبود صددرصدی دقت استخراج...`);
+      processedImgData = await cropOcrImage(imgData, ocrRoiPreset, ocrCustomCoords);
+    }
     
     const endpointUrl = "/api/ocr";
     const requestHeaders = { "Content-Type": "application/json" };
-    const base64Length = imgData.length;
-    const base64Sample = imgData.substring(0, 100);
-    const hasDataPrefix = imgData.startsWith("data:");
+    const base64Length = processedImgData.length;
+    const base64Sample = processedImgData.substring(0, 100);
+    const hasDataPrefix = processedImgData.startsWith("data:");
 
     const getPayload = (model: string) => ({
       imageBase64Length: base64Length,
@@ -1749,7 +1815,7 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
       headers: requestHeaders,
       payloadSummary: getPayload(currentModel),
       hasDataPrefix,
-      isString: typeof imgData === "string"
+      isString: typeof processedImgData === "string"
     });
 
     const startTime = performance.now();
@@ -1761,7 +1827,7 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
           method: "POST",
           headers: requestHeaders,
           body: JSON.stringify({
-            imageBase64: imgData,
+            imageBase64: processedImgData,
             mimeType: "image/png",
             modelType: currentModel,
             roiPreset: ocrRoiPreset,
@@ -1813,7 +1879,7 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
             method: "POST",
             headers: requestHeaders,
             body: JSON.stringify({
-              imageBase64: imgData,
+              imageBase64: processedImgData,
               mimeType: "image/png",
               modelType: "general",
               roiPreset: ocrRoiPreset,
@@ -1841,6 +1907,7 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
       if (res && res.ok) {
         const data = await res.json();
         setOcrExtractedText(data.extractedText);
+        setIsOcrFallback(!!data.isOfflineFallback);
         addSystemLog(`پردازش ممیزی تصویر کامل و بازخوانی شد (نوع مدل نهایی: ${data.usedModel || currentModel}).`);
       } else {
         const status = res ? res.status : "Unknown";
@@ -2018,7 +2085,7 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
   };
 
   // Download translated file as valid MS Word (.doc) rich HTML format
-  const downloadTranslatedFile = (file: any) => {
+  const downloadTranslatedFile = (file: any, mode: 'both' | 'bilingual' | 'clean' = 'both') => {
     const content = file.translatedContent || `Translated Omran Azarestan Co. File content: ${file.name}\n\nThis is a backup placeholder for the translated document.`;
     const isRtl = file.target === "fa";
     
@@ -2148,19 +2215,136 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
 </html>
     `;
 
-    const blob = new Blob([htmlContent], { type: "application/msword;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    
-    // We change downloaded extension to .doc which Word handles perfectly with HTML format
-    const docName = file.translatedName.replace(/\.docx$/, ".doc").replace(/\.pdf$/, ".doc");
-    a.download = docName;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    addSystemLog(`دریافت سند رسمی واژه‌آرا شده با فرمت Word: "${docName}"`);
+    if (mode === 'both' || mode === 'bilingual') {
+      const blob = new Blob([htmlContent], { type: "application/msword;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      
+      // We change downloaded extension to .doc which Word handles perfectly with HTML format
+      const docName = file.translatedName.replace(/\.docx$/, ".doc").replace(/\.pdf$/, ".doc");
+      a.download = docName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      addSystemLog(`دریافت سند رسمی واژه‌آرا شده با فرمت Word: "${docName}"`);
+    }
+
+    // Prepare translated text ONLY (Second output document)
+    let translatedOnlyContent = "";
+    if (lines.length < 2) {
+      const isPersian = /[\u0600-\u06FF]/.test(content);
+      const dir = isPersian ? "rtl" : "ltr";
+      const align = isPersian ? "right" : "left";
+      translatedOnlyContent = `<div dir="${dir}" style="text-align: ${align}; direction: ${dir}; white-space: pre-wrap; font-family: Arial, sans-serif; font-size: 14px; line-height: 1.8;">${content}</div>`;
+    } else {
+      for (let i = 0; i < lines.length; i += 2) {
+        const translated = lines[i + 1] || "";
+        if (!translated) continue;
+        const transRtl = /[\u0600-\u06FF]/.test(translated);
+        const transDir = transRtl ? "rtl" : "ltr";
+        const transAlign = transRtl ? "right" : "left";
+        translatedOnlyContent += `
+          <p dir="${transDir}" style="text-align: ${transAlign}; direction: ${transDir}; font-family: Arial, sans-serif; font-size: 14.5px; line-height: 1.8; margin-bottom: 18px; text-indent: 20px;">
+            ${translated}
+          </p>
+        `;
+      }
+    }
+
+    const htmlContentOnly = `
+<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
+<head>
+  <meta charset="utf-8">
+  <title>فقط ترجمه - ${file.translatedName}</title>
+  <!--[if gte mso 9]>
+  <xml>
+    <w:WordDocument>
+      <w:View>Print</w:View>
+      <w:Zoom>100</w:Zoom>
+      <w:DoNotOptimizeForBrowser/>
+    </w:WordDocument>
+  </xml>
+  <![endif]-->
+  <style>
+    body {
+      font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
+      direction: ${isRtl ? 'rtl' : 'ltr'};
+      text-align: ${isRtl ? 'right' : 'left'};
+      padding: 30px;
+      line-height: 1.8;
+      color: #1e293b;
+    }
+    h2 {
+      font-family: Arial, sans-serif;
+      color: #0f766e;
+      border-bottom: 2px solid #0d9488;
+      padding-bottom: 10px;
+      margin-bottom: 20px;
+      font-size: 20px;
+    }
+    .meta {
+      font-size: 12px;
+      color: #64748b;
+      margin-bottom: 30px;
+      padding: 10px;
+      background-color: #f0fdfa;
+      border: 1px solid #ccfbf1;
+      border-radius: 4px;
+    }
+    .footer {
+      margin-top: 60px;
+      border-top: 1px solid #cbd5e1;
+      padding-top: 15px;
+      font-size: 10px;
+      color: #94a3b8;
+    }
+  </style>
+</head>
+<body>
+  <h2>سامانه ترجمه هوشمند اسناد (نسخه مستقل ترجمه) - شرکت عمران آذرستان</h2>
+  <div class="meta">
+    <strong>نام فایل اصلی:</strong> ${file.name}<br/>
+    <strong>زبان مبدا:</strong> ${file.source.toUpperCase()} ❖ <strong>زبان مقصد:</strong> ${file.target.toUpperCase()}<br/>
+    <strong>تاریخ صدور سند:</strong> ${new Date().toLocaleDateString('fa-IR')}
+  </div>
+  
+  <div class="content-body" style="font-size: 14.5px; line-height: 1.8;">
+    ${translatedOnlyContent}
+  </div>
+
+  <div class="footer">
+    این سند شامل متن ترجمه شده مستقل و پاک‌نویس شده است که به صورت رسمی توسط سامانه هوشمند ترجمه عمران آذرستان صادر گردیده است. تمامی حقوق محفوظ می‌باشد.
+  </div>
+</body>
+</html>
+    `;
+
+    if (mode === 'both' || mode === 'clean') {
+      const blobOnly = new Blob([htmlContentOnly], { type: "application/msword;charset=utf-8" });
+      const urlOnly = URL.createObjectURL(blobOnly);
+      const aOnly = document.createElement("a");
+      aOnly.href = urlOnly;
+      const docNameOnly = "ترجمه_تنها_" + file.translatedName.replace(/\.docx$/, ".doc").replace(/\.pdf$/, ".doc");
+      aOnly.download = docNameOnly;
+      document.body.appendChild(aOnly);
+      
+      if (mode === 'both') {
+        // Download consecutively after a tiny delay
+        setTimeout(() => {
+          aOnly.click();
+          document.body.removeChild(aOnly);
+          URL.revokeObjectURL(urlOnly);
+        }, 250);
+      } else {
+        aOnly.click();
+        document.body.removeChild(aOnly);
+        URL.revokeObjectURL(urlOnly);
+      }
+      
+      addSystemLog(`دریافت سند رسمی پاک‌نویس ترجمه به عنوان فایل دوم: "${docNameOnly}"`);
+    }
   };
 
   // Simulated Export Dictionary (JSON format)
@@ -2801,19 +2985,25 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
                         </div>
                       )}
 
-                      <div className="flex justify-between items-center mt-2 pt-2 border-t border-slate-100">
+                      <div className="flex flex-wrap justify-between items-center mt-2 pt-2 border-t border-slate-100 gap-2">
                         {/* Audio Dictation button inline */}
-                        <button
-                          onClick={toggleDictation}
-                          className={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
-                            isDictating 
-                              ? "bg-red-500 text-white animate-pulse" 
-                              : "bg-brand-primary/10 text-brand-primary hover:bg-brand-primary/20"
-                          }`}
-                        >
-                          {isDictating ? <MicOff className="h-3.5 w-3.5" /> : <Mic className="h-3.5 w-3.5" />}
-                          {isDictating ? "پایان ضبط..." : "املا گفتاری (STT)"}
-                        </button>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            onClick={toggleDictation}
+                            className={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                              isDictating 
+                                ? "bg-red-500 text-white animate-pulse" 
+                                : "bg-brand-primary/10 text-brand-primary hover:bg-brand-primary/20"
+                            }`}
+                          >
+                            {isDictating ? <MicOff className="h-3.5 w-3.5" /> : <Mic className="h-3.5 w-3.5" />}
+                            {isDictating ? "پایان ضبط..." : "املا گفتاری (STT)"}
+                          </button>
+                          
+                          <span className="text-[10px] text-slate-400 bg-amber-50/75 border border-amber-200/45 px-2 py-0.5 rounded-lg">
+                            💡 در صورت بروز خطا در دسترسی به میکروفون، دکمه «باز کردن در تب جدید» بالای صفحه مرورگر را بفشارید.
+                          </span>
+                        </div>
 
                         <button 
                           onClick={() => setSourceText("")} 
@@ -3556,20 +3746,27 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
                             
                             <div className="text-left font-mono">
                               {file.status === "done" ? (
-                                <div className="flex items-center gap-1.5">
+                                <div className="flex flex-wrap items-center gap-1.5 justify-end">
                                   <button 
                                     onClick={() => setPreviewFile(file)}
-                                    className="flex items-center gap-1 text-indigo-600 hover:text-indigo-700 font-bold bg-indigo-50 px-2 py-1 rounded border border-indigo-200 hover:bg-indigo-100 cursor-pointer"
+                                    className="flex items-center gap-1 text-indigo-600 hover:text-indigo-700 font-bold bg-indigo-50 px-2 py-1 rounded border border-indigo-200 hover:bg-indigo-100 cursor-pointer text-xs"
                                     title="مشاهده پیش‌نمایش تراز شده"
                                   >
-                                    <Eye className="h-3.5 w-3.5" /> پیش‌نمایش
+                                    <Eye className="h-3 w-3" /> پیش‌نمایش
                                   </button>
                                   <button 
-                                    onClick={() => downloadTranslatedFile(file)}
-                                    className="flex items-center gap-1 text-emerald-600 hover:text-emerald-700 font-bold bg-emerald-50 px-2 py-1 rounded border border-emerald-200 hover:bg-emerald-100 cursor-pointer"
-                                    title="دانلود سند Word"
+                                    onClick={() => downloadTranslatedFile(file, 'bilingual')}
+                                    className="flex items-center gap-1 text-emerald-600 hover:text-emerald-700 font-bold bg-emerald-50 px-2 py-1 rounded border border-emerald-200 hover:bg-emerald-100 cursor-pointer text-xs animate-pulse"
+                                    title="دانلود سند Word دو زبانه تراز شده"
                                   >
-                                    <Download className="h-3.5 w-3.5" /> دانلود نسخه ترجمه شده
+                                    <Download className="h-3 w-3" /> دانلود دوزبانه
+                                  </button>
+                                  <button 
+                                    onClick={() => downloadTranslatedFile(file, 'clean')}
+                                    className="flex items-center gap-1 text-teal-600 hover:text-teal-700 font-bold bg-teal-50 px-2 py-1 rounded border border-teal-200 hover:bg-teal-100 cursor-pointer text-xs"
+                                    title="دانلود سند Word فقط شامل متن ترجمه شده"
+                                  >
+                                    <FileText className="h-3 w-3" /> دانلود ترجمه تنها 📄
                                   </button>
                                 </div>
                               ) : (
@@ -3864,12 +4061,28 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
                                     target: archive.targetLang,
                                     translatedContent: archive.translatedContent
                                   };
-                                  downloadTranslatedFile(mapped);
+                                  downloadTranslatedFile(mapped, 'bilingual');
                                 }}
                                 className="flex items-center gap-1 text-emerald-600 hover:text-emerald-700 font-bold bg-emerald-50 px-2.5 py-1.5 rounded-lg border border-emerald-100 hover:bg-emerald-100 cursor-pointer text-xs"
-                                title="دانلود سند Word"
+                                title="دانلود سند Word دو زبانه تراز شده"
                               >
-                                <Download className="h-3.5 w-3.5" /> دانلود Word
+                                <Download className="h-3.5 w-3.5" /> دانلود دوزبانه
+                              </button>
+                              <button 
+                                onClick={() => {
+                                  const mapped = {
+                                    ...archive,
+                                    name: archive.fileName,
+                                    source: archive.sourceLang,
+                                    target: archive.targetLang,
+                                    translatedContent: archive.translatedContent
+                                  };
+                                  downloadTranslatedFile(mapped, 'clean');
+                                }}
+                                className="flex items-center gap-1 text-teal-600 hover:text-teal-700 font-bold bg-teal-50 px-2.5 py-1.5 rounded-lg border border-teal-100 hover:bg-teal-100 cursor-pointer text-xs"
+                                title="دانلود سند Word فقط شامل متن ترجمه شده"
+                              >
+                                <FileText className="h-3.5 w-3.5" /> ترجمه تنها 📄
                               </button>
                               <button 
                                 onClick={() => deleteArchivedFile(archive.id)}
@@ -4216,6 +4429,18 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
                     ) : (
                       ocrExtractedText && (
                         <div className="flex flex-col gap-2 mt-2 bg-indigo-950/5 p-3 rounded-xl border border-indigo-100">
+                          {isOcrFallback && (
+                            <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-right text-xs text-amber-900 leading-relaxed" dir="rtl">
+                              <div className="flex items-center gap-1.5 font-bold mb-1 text-amber-950">
+                                <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                                حالت شبیه‌ساز آفلاین فعال است
+                              </div>
+                              <p className="text-[11px] text-slate-700">
+                                ⚠️ کلید معتبر هوش مصنوعی (<code className="font-mono bg-amber-100/60 px-1 py-0.5 rounded text-[10px]">GEMINI_API_KEY</code>) در بخش تنظیمات Secrets ثبت نشده است. برای استخراج واقعی متن از تصاویر اختصاصی خود، لطفاً کلید معتبر خود را به برنامه معرفی نمایید. متن فوق یک فایل نمونه است.
+                              </p>
+                            </div>
+                          )}
+
                           <div className="flex items-center justify-between">
                             <label className="text-[10px] font-black text-slate-700">داده‌های متنی استخراج شده از تصویر فریم:</label>
                             <span className="font-mono text-[9px] text-slate-400">انتقال مجاز به هوش مصنوعی</span>
@@ -4537,9 +4762,12 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
                     </p>
 
                     {glossarySttError && (
-                      <p className="text-[11px] text-red-600 mb-2 p-1.5 bg-red-50 rounded border border-red-100 font-medium">
-                        {glossarySttError}
-                      </p>
+                      <div className="text-[11px] text-red-600 mb-2 p-1.5 bg-red-50 rounded border border-red-100 font-medium space-y-1">
+                        <p>{glossarySttError}</p>
+                        <p className="text-[10px] text-slate-500 font-normal">
+                          💡 نکته: مرورگرهای امروزی به دلایل امنیتی دسترسی میکروفون را درون آی‌فریم (iFrame) مسدود می‌کنند. برای استفاده بدون مشکل از قابلیت‌های صوتی، لطفاً روی دکمه «باز کردن در تب جدید» در بالای صفحه کلیک فرمایید.
+                        </p>
+                      </div>
                     )}
 
                     {/* Equalizer animation */}
@@ -5622,15 +5850,28 @@ Interim Payment Certificates (IPCs) shall be compiled based on joint measurement
             {/* Footer */}
             <div className="p-4 border-t border-slate-150 bg-slate-50 flex justify-between items-center">
               <span className="text-[10px] text-slate-400 font-bold">بخش‌های استخراج شده: {Math.ceil((previewFile.translatedContent || "").split('\n').filter((l: string) => l.trim()).length / 2)} بند دو زبانه</span>
-              <button
-                onClick={() => {
-                  downloadTranslatedFile(previewFile);
-                  setPreviewFile(null);
-                }}
-                className="text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold px-4 py-2 rounded-lg transition-all flex items-center gap-1.5 cursor-pointer shadow-sm"
-              >
-                <Download className="h-4.5 w-4.5" /> دانلود فایل سند (.doc Word)
-              </button>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    downloadTranslatedFile(previewFile, 'bilingual');
+                    setPreviewFile(null);
+                  }}
+                  className="text-xs bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold px-3 py-2 rounded-lg transition-all flex items-center gap-1.5 cursor-pointer shadow-sm"
+                  title="دانلود فایل Word با ترازبندی دو زبانه"
+                >
+                  <Download className="h-4 w-4" /> دانلود نسخه دو زبانه
+                </button>
+                <button
+                  onClick={() => {
+                    downloadTranslatedFile(previewFile, 'clean');
+                    setPreviewFile(null);
+                  }}
+                  className="text-xs bg-teal-600 hover:bg-teal-700 text-white font-extrabold px-3 py-2 rounded-lg transition-all flex items-center gap-1.5 cursor-pointer shadow-sm"
+                  title="دانلود فایل Word فقط شامل متن ترجمه شده"
+                >
+                  <FileText className="h-4 w-4" /> دانلود فقط ترجمه 📄
+                </button>
+              </div>
             </div>
           </div>
         </div>
